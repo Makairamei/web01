@@ -41,6 +41,10 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('headerActions').addEventListener('click', handleHeaderClick);
     document.getElementById('modalContent').addEventListener('click', handleModalClick);
 
+    // Theme toggle
+    initTheme();
+    document.getElementById('themeToggle').addEventListener('click', toggleTheme);
+
     // Init
     if (token) {
         showApp();
@@ -49,6 +53,34 @@ document.addEventListener('DOMContentLoaded', () => {
         showLogin();
     }
 });
+
+// ============================================================
+// THEME TOGGLE
+// ============================================================
+function initTheme() {
+    const saved = localStorage.getItem('cs_theme');
+    if (saved === 'dark') {
+        document.documentElement.setAttribute('data-theme', 'dark');
+    }
+    updateThemeButton();
+}
+function toggleTheme() {
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    if (isDark) {
+        document.documentElement.removeAttribute('data-theme');
+        localStorage.setItem('cs_theme', 'light');
+    } else {
+        document.documentElement.setAttribute('data-theme', 'dark');
+        localStorage.setItem('cs_theme', 'dark');
+    }
+    updateThemeButton();
+}
+function updateThemeButton() {
+    const btn = document.getElementById('themeToggle');
+    if (!btn) return;
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    btn.textContent = isDark ? '☀️ Light' : '🌙 Dark';
+}
 
 // ============================================================
 // EVENT DELEGATION HANDLERS
@@ -420,21 +452,33 @@ function closeModal() {
 
 function formatDate(d) {
     if (!d) return '-';
-    return new Date(d).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    try {
+        return new Date(d).toLocaleDateString('id-ID', { timeZone: 'Asia/Jakarta', year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) + ' WIB';
+    } catch (e) { return '-'; }
 }
 
-function timeAgo(d) {
+function formatWIB(d) {
     if (!d) return '-';
-    const diff = Date.now() - new Date(d).getTime();
-    const m = Math.floor(diff / 60000);
-    if (m < 1) return 'Just now';
-    if (m < 60) return `${m}m ago`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h ago`;
-    return `${Math.floor(h / 24)}d ago`;
+    try {
+        const dt = new Date(d);
+        if (isNaN(dt.getTime())) return '-';
+        const opts = { timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false };
+        return dt.toLocaleDateString('en-GB', opts).replace(',', '') + ' WIB';
+    } catch (e) { return '-'; }
 }
+
+// Keep timeAgo for backwards compat but use formatWIB in new code
+function timeAgo(d) { return formatWIB(d); }
 
 function esc(s) { return !s ? '' : String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+
+// Device label: show device_name if exists, else "Device N" based on position, else truncated ID
+function deviceLabel(deviceName, deviceId, deviceIndex) {
+    if (deviceName && deviceName.trim() && deviceName.trim() !== 'unknown') return deviceName.trim();
+    if (typeof deviceIndex === 'number' && deviceIndex >= 0) return 'Device ' + (deviceIndex + 1);
+    if (deviceId && deviceId !== 'unknown' && deviceId !== '') return deviceId.substring(0, 10);
+    return '-';
+}
 
 function statusBadge(s) {
     const c = { active: 'badge-active', expired: 'badge-expired', revoked: 'badge-revoked', trashed: 'badge-trashed' };
@@ -657,10 +701,10 @@ async function viewLicenseDetails(id) {
         // Devices tab
         var devicesHtml = '<div class="empty-state"><p>No devices registered</p></div>';
         if (d.devices && d.devices.length) {
-            devicesHtml = '<table style="font-size:12px"><thead><tr><th>Device</th><th>IP</th><th>Last Seen</th><th>Status</th></tr></thead><tbody>' +
-                d.devices.map(function (dev) {
-                    return '<tr><td>' + esc(dev.device_name || (dev.device_id ? dev.device_id.substring(0, 16) : '-')) + '</td>' +
-                        '<td>' + esc(dev.ip_address) + '</td><td>' + timeAgo(dev.last_seen) + '</td>' +
+            devicesHtml = '<table style="font-size:12px"><thead><tr><th>Device</th><th>IP</th><th>Last Seen (WIB)</th><th>Status</th></tr></thead><tbody>' +
+                d.devices.map(function (dev, i) {
+                    return '<tr><td>' + esc(deviceLabel(dev.device_name, dev.device_id, i)) + '</td>' +
+                        '<td>' + esc(dev.ip_address) + '</td><td style="white-space:nowrap">' + formatWIB(dev.last_seen) + '</td>' +
                         '<td>' + (dev.is_blocked ? '<span class="badge badge-blocked">Blocked</span>' : '<span class="badge badge-active">Active</span>') + '</td></tr>';
                 }).join('') + '</tbody></table>';
         }
@@ -668,22 +712,40 @@ async function viewLicenseDetails(id) {
         // Plugins tab
         var pluginHtml = '<div class="empty-state"><p>No plugin activity</p></div>';
         if (d.pluginUsage && d.pluginUsage.length) {
-            pluginHtml = '<table style="font-size:12px"><thead><tr><th>Plugin</th><th>Action</th><th>Device</th><th>Time</th></tr></thead><tbody>' +
-                d.pluginUsage.slice(0, 20).map(function (p) {
-                    return '<tr><td>' + esc(p.plugin_name) + '</td><td><span class="badge badge-info">' + esc(p.action) + '</span></td>' +
-                        '<td>' + esc(p.device_id ? p.device_id.substring(0, 12) : '-') + '</td><td>' + timeAgo(p.used_at) + '</td></tr>';
+            pluginHtml = '<table style="font-size:12px"><thead><tr><th>Plugin</th><th>Action</th><th>Device</th><th>IP</th><th>Time (WIB)</th></tr></thead><tbody>' +
+                d.pluginUsage.slice(0, 30).map(function (p, i) {
+                    return '<tr><td>' + esc(p.plugin_name) + '</td>' +
+                        '<td><span class="badge badge-info">' + esc(p.action) + '</span></td>' +
+                        '<td title="ID: ' + esc(p.device_id || '') + '">' + esc(deviceLabel(p.device_name, p.device_id)) + '</td>' +
+                        '<td style="color:var(--text-muted);font-size:11px">' + esc(p.ip_address || '-') + '</td>' +
+                        '<td style="white-space:nowrap">' + formatWIB(p.used_at) + '</td></tr>';
+                }).join('') + '</tbody></table>';
+        }
+
+        // Playback tab
+        var playbackHtml = '<div class="empty-state"><p>No playback history</p></div>';
+        if (d.playbackLogs && d.playbackLogs.length) {
+            playbackHtml = '<table style="font-size:12px"><thead><tr><th>Video</th><th>Plugin</th><th>Device</th><th>Type</th><th>Time (WIB)</th></tr></thead><tbody>' +
+                d.playbackLogs.slice(0, 30).map(function (pb) {
+                    var typeBadge = pb.source_provider === 'DOWNLOAD' ? '<span class="badge badge-expired">DOWNLOAD</span>' : '<span class="badge badge-info">PLAY</span>';
+                    return '<tr><td title="' + esc(pb.video_title) + '">' + esc(pb.video_title ? pb.video_title.substring(0, 35) : '-') + '</td>' +
+                        '<td>' + esc(pb.plugin_name) + '</td>' +
+                        '<td title="ID: ' + esc(pb.device_id || '') + '">' + esc(deviceLabel(pb.device_name, pb.device_id)) + '</td>' +
+                        '<td>' + typeBadge + '</td>' +
+                        '<td style="white-space:nowrap">' + formatWIB(pb.played_at) + '</td></tr>';
                 }).join('') + '</tbody></table>';
         }
 
         // Logs tab
         var logsHtml = '<div class="empty-state"><p>No activity logs</p></div>';
         if (d.recentLogs && d.recentLogs.length) {
-            logsHtml = '<table style="font-size:12px"><thead><tr><th>Action</th><th>IP</th><th>Details</th><th>Time</th></tr></thead><tbody>' +
-                d.recentLogs.slice(0, 20).map(function (lg) {
+            logsHtml = '<table style="font-size:12px"><thead><tr><th>Action</th><th>Device</th><th>IP</th><th>Details</th><th>Time (WIB)</th></tr></thead><tbody>' +
+                d.recentLogs.slice(0, 30).map(function (lg) {
                     return '<tr><td><span class="badge badge-info">' + esc(lg.action) + '</span></td>' +
-                        '<td>' + esc(lg.ip_address) + '</td>' +
-                        '<td title="' + esc(lg.details) + '">' + esc(lg.details ? lg.details.substring(0, 30) : '-') + '</td>' +
-                        '<td>' + timeAgo(lg.created_at) + '</td></tr>';
+                        '<td title="ID: ' + esc(lg.device_id || '') + '">' + esc(deviceLabel(lg.device_name, lg.device_id)) + '</td>' +
+                        '<td style="color:var(--text-muted);font-size:11px">' + esc(lg.ip_address) + '</td>' +
+                        '<td title="' + esc(lg.details) + '">' + esc(lg.details ? lg.details.substring(0, 40) : '-') + '</td>' +
+                        '<td style="white-space:nowrap">' + formatWIB(lg.created_at) + '</td></tr>';
                 }).join('') + '</tbody></table>';
         }
 
@@ -718,9 +780,11 @@ async function viewLicenseDetails(id) {
             '<div class="inline-tabs">' +
             '<button class="inline-tab active" data-action="detail-tab" data-value="devices">Devices (' + (d.devices ? d.devices.length : 0) + ')</button>' +
             '<button class="inline-tab" data-action="detail-tab" data-value="plugins">Plugins (' + (d.pluginUsage ? d.pluginUsage.length : 0) + ')</button>' +
+            '<button class="inline-tab" data-action="detail-tab" data-value="playback">Playback (' + (d.playbackLogs ? d.playbackLogs.length : 0) + ')</button>' +
             '<button class="inline-tab" data-action="detail-tab" data-value="logs">Logs (' + (d.recentLogs ? d.recentLogs.length : 0) + ')</button></div>' +
             '<div class="tab-panel active" data-tab="devices">' + devicesHtml + '</div>' +
             '<div class="tab-panel" data-tab="plugins">' + pluginHtml + '</div>' +
+            '<div class="tab-panel" data-tab="playback">' + playbackHtml + '</div>' +
             '<div class="tab-panel" data-tab="logs">' + logsHtml + '</div></div></div>' +
             // Footer
             '<div class="modal-footer">' +
@@ -1044,95 +1108,70 @@ let activityRefreshInterval = null;
 
 async function renderActivityFeed() {
     const c = document.getElementById('pageContent');
-    document.getElementById('headerActions').innerHTML = '<button class="btn btn-sm btn-secondary" data-action="refresh-activity"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Refresh</button>';
+    document.getElementById('headerActions').innerHTML = '<button class="btn btn-sm btn-secondary" data-action="refresh-activity">Refresh</button>';
     c.innerHTML = '<div class="loading-overlay"><div class="spinner"></div></div>';
 
     try {
-        const data = await apiFetch('/api/admin/activity-feed?minutes=60&limit=200');
+        const data = await apiFetch('/api/admin/activity-feed?minutes=1440&limit=200');
 
-        const actionColors = {
-            'HOME': 'badge-info', 'OPEN': 'badge-info', 'SEARCH': 'badge-active',
-            'LOAD': 'badge-active', 'PLAY': 'badge-warning', 'DOWNLOAD': 'badge-expired',
-            'SWITCH': 'badge-info'
-        };
+        // Build device index per license for numbering
+        const deviceMap = {};
+        if (data.feed) {
+            data.feed.forEach(item => {
+                if (!item.device_id || item.device_id === 'unknown') return;
+                if (!deviceMap[item.license_key]) deviceMap[item.license_key] = [];
+                if (!deviceMap[item.license_key].includes(item.device_id)) {
+                    deviceMap[item.license_key].push(item.device_id);
+                }
+            });
+        }
 
-        const actionIcons = {
-            'HOME': '🏠', 'OPEN': '📂', 'SEARCH': '🔍', 'LOAD': '📄',
-            'PLAY': '▶️', 'DOWNLOAD': '⬇️', 'SWITCH': '🔄', 'playback': '🎬'
-        };
+        function getDevLabel(item) {
+            const idx = (deviceMap[item.license_key] || []).indexOf(item.device_id);
+            return deviceLabel(item.device_name, item.device_id, idx >= 0 ? idx : undefined);
+        }
 
-        let feedHtml = '';
+        let tableRows = '';
         if (data.feed && data.feed.length) {
-            feedHtml = '<div class="activity-feed">' + data.feed.map(item => {
+            tableRows = data.feed.map(item => {
                 const isPlayback = item.type === 'playback';
-                const actionBadge = isPlayback
-                    ? '<span class="badge badge-warning">PLAY</span>'
-                    : '<span class="badge ' + (actionColors[item.action] || 'badge-info') + '">' + esc(item.action) + '</span>';
-                const icon = isPlayback ? actionIcons['playback'] : (actionIcons[item.action] || '📋');
-                const detail = isPlayback
-                    ? '<span style="color:var(--text-primary);font-weight:500">' + esc(item.video_title || '') + '</span> <span style="color:var(--text-muted)">via</span> ' + esc(item.plugin_name)
-                    : '<span style="color:var(--text-primary);font-weight:500">' + esc(item.plugin_name) + '</span>';
-                const source = isPlayback && item.source_provider === 'DOWNLOAD' ? ' <span class="badge badge-expired">DL</span>' : '';
-                // Device label: prefer device_name, fallback to shortened device_id
-                const deviceLabel = (item.device_name && item.device_name.trim())
-                    ? item.device_name
-                    : (item.device_id ? item.device_id.substring(0, 14) : '');
-                const deviceBit = deviceLabel ? ' · 📱 <span style="color:var(--text-secondary)">' + esc(deviceLabel) + '</span>' : '';
+                const action = isPlayback ? (item.source_provider === 'DOWNLOAD' ? 'DOWNLOAD' : 'PLAY') : item.action;
+                const plugin = esc(item.plugin_name || '-');
+                const detail = isPlayback && item.video_title ? esc(item.video_title.substring(0, 40)) : '';
+                const key = esc(item.license_name || item.license_key?.substring(0, 14) || '-');
+                const dev = esc(getDevLabel(item));
+                const ip = esc(item.ip_address || '-');
+                const time = formatWIB(item.timestamp);
 
-                return '<div class="activity-item">' +
-                    '<div class="activity-icon">' + icon + '</div>' +
-                    '<div class="activity-body">' +
-                    '<div class="activity-main">' + actionBadge + ' ' + detail + source + '</div>' +
-                    '<div class="activity-meta">' +
-                    '<span class="license-key" data-action="copy" data-value="' + esc(item.license_key) + '" title="Click to copy">' + esc(item.license_name || item.license_key?.substring(0, 12)) + '</span>' +
-                    deviceBit +
-                    ' · ' + esc(item.ip_address) +
-                    ' · ' + timeAgo(item.timestamp) +
-                    '</div></div></div>';
-            }).join('') + '</div>';
-        } else {
-            feedHtml = '<div class="empty-state"><p>No activity in the last 60 minutes</p></div>';
+                return '<tr>' +
+                    '<td>' + plugin + (detail ? '<br><small style="color:var(--text-muted)">' + detail + '</small>' : '') + '</td>' +
+                    '<td><span class="badge badge-info">' + esc(action) + '</span></td>' +
+                    '<td class="key-cell" data-action="copy" data-value="' + esc(item.license_key) + '" title="Click to copy">' + key + '</td>' +
+                    '<td>' + dev + '</td>' +
+                    '<td>' + ip + '</td>' +
+                    '<td style="white-space:nowrap">' + time + '</td></tr>';
+            }).join('');
         }
 
         // Summary stats
-        const plays = data.feed ? data.feed.filter(f => f.type === 'playback' || f.action === 'PLAY').length : 0;
-        const searches = data.feed ? data.feed.filter(f => f.action === 'SEARCH').length : 0;
-        const downloads = data.feed ? data.feed.filter(f => f.source_provider === 'DOWNLOAD').length : 0;
+        const total = data.feed ? data.feed.length : 0;
         const uniqueUsers = data.feed ? new Set(data.feed.map(f => f.license_key)).size : 0;
+        const plays = data.feed ? data.feed.filter(f => f.type === 'playback' || f.action === 'PLAY').length : 0;
+        const uniqueDevices = data.feed ? new Set(data.feed.filter(f => f.device_id && f.device_id !== 'unknown').map(f => f.license_key + ':' + f.device_id)).size : 0;
 
-        c.innerHTML = `
-            <div class="stats-grid" style="margin-bottom:20px">
-                <div class="stat-card mini">
-                    <div class="stat-card-value">${data.count || 0}</div>
-                    <div class="stat-card-label">Total Events</div>
-                </div>
-                <div class="stat-card mini">
-                    <div class="stat-card-value">${uniqueUsers}</div>
-                    <div class="stat-card-label">Active Users</div>
-                </div>
-                <div class="stat-card mini">
-                    <div class="stat-card-value">${plays}</div>
-                    <div class="stat-card-label">Plays</div>
-                </div>
-                <div class="stat-card mini">
-                    <div class="stat-card-value">${searches}</div>
-                    <div class="stat-card-label">Searches</div>
-                </div>
-                <div class="stat-card mini">
-                    <div class="stat-card-value">${downloads}</div>
-                    <div class="stat-card-label">Downloads</div>
-                </div>
-            </div>
-            <div class="table-container">
-                <div class="table-header">
-                    <h3>Live Feed <span class="badge badge-active" style="font-size:11px;animation:pulse 2s infinite">● LIVE</span></h3>
-                    <div class="table-actions"><span style="color:var(--text-muted);font-size:12px">Auto-refreshes every 30s</span></div>
-                </div>
-                ${feedHtml}
-            </div>
-        `;
+        c.innerHTML =
+            '<div class="stats-grid" style="margin-bottom:16px">' +
+            '<div class="stat-card mini"><div class="stat-card-value">' + total + '</div><div class="stat-card-label">Events</div></div>' +
+            '<div class="stat-card mini"><div class="stat-card-value">' + uniqueUsers + '</div><div class="stat-card-label">Users</div></div>' +
+            '<div class="stat-card mini"><div class="stat-card-value">' + uniqueDevices + '</div><div class="stat-card-label">Devices</div></div>' +
+            '<div class="stat-card mini"><div class="stat-card-value">' + plays + '</div><div class="stat-card-label">Plays</div></div>' +
+            '</div>' +
+            '<div class="table-container">' +
+            '<div class="table-header"><h3>Activity Log</h3>' +
+            '<div class="table-actions"><span style="color:var(--text-muted);font-size:12px">Last 24 hours</span></div></div>' +
+            '<table><thead><tr><th>Plugin</th><th>Action</th><th>Key</th><th>Device</th><th>IP</th><th>Time (WIB)</th></tr></thead>' +
+            '<tbody>' + (tableRows || '<tr><td colspan="6"><div class="empty-state"><p>No activity</p></div></td></tr>') + '</tbody></table></div>';
 
-        // Auto refresh every 30s
         if (!activityRefreshInterval) {
             activityRefreshInterval = setInterval(() => {
                 if (currentPage === 'activity') renderActivityFeed();
@@ -1143,6 +1182,7 @@ async function renderActivityFeed() {
         c.innerHTML = '<div class="empty-state"><p>Failed to load activity feed</p></div>';
     }
 }
+
 
 // ============================================================
 // ACTIVE SESSIONS
@@ -1211,14 +1251,14 @@ async function renderPluginUsage(page = 1) {
             <td>${esc(l.plugin_name)}</td>
             <td><span class="badge badge-info">${esc(l.action)}</span></td>
             <td><span class="license-key" data-action="copy" data-value="${esc(l.license_key)}">${esc(l.license_name || l.license_key?.substring(0, 15))}</span></td>
-            <td title="${esc(l.device_id)}">${esc(l.device_name || l.device_id?.substring(0, 16) || '-')}</td>
+            <td title="ID: ${esc(l.device_id)}">${esc(deviceLabel(l.device_name, l.device_id))}</td>
             <td>${esc(l.ip_address)}</td>
-            <td>${timeAgo(l.used_at)}</td>
+            <td style="white-space:nowrap">${formatWIB(l.used_at)}</td>
         </tr>`).join('') : '';
 
         c.innerHTML = `<div class="table-container">
             <div class="table-header"><h3>Plugin Activity (${data.total})</h3><div class="table-actions">${searchBox('puSearchInput', 'Search plugins/devices...', 'pu-search')}</div></div>
-            <table><thead><tr><th>Plugin</th><th>Action</th><th>License</th><th>Device</th><th>IP</th><th>Time</th></tr></thead>
+            <table><thead><tr><th>Plugin</th><th>Action</th><th>License</th><th>Device</th><th>IP</th><th>Time (WIB)</th></tr></thead>
             <tbody>${rows || '<tr><td colspan="6"><div class="empty-state"><p>No plugin activity</p></div></td></tr>'}</tbody></table>
             <div class="table-footer"><span>Page ${page} of ${tp || 1}</span>${pagBtns(page, tp, 'pu-page')}</div>
         </div>`;
@@ -1242,14 +1282,14 @@ async function renderPlaybackLogs(page = 1) {
             <td>${esc(l.plugin_name)}</td>
             <td>${esc(l.source_provider || '-')}</td>
             <td><span class="license-key" data-action="copy" data-value="${esc(l.license_key)}">${esc(l.license_name || l.license_key?.substring(0, 15))}</span></td>
-            <td title="${esc(l.device_id)}">${esc(l.device_name || l.device_id?.substring(0, 16) || '-')}</td>
+            <td title="ID: ${esc(l.device_id)}">${esc(deviceLabel(l.device_name, l.device_id))}</td>
             <td>${esc(l.ip_address)}</td>
-            <td>${timeAgo(l.played_at)}</td>
+            <td style="white-space:nowrap">${formatWIB(l.played_at)}</td>
         </tr>`).join('') : '';
 
         c.innerHTML = `<div class="table-container">
             <div class="table-header"><h3>Playback History (${data.total})</h3><div class="table-actions">${searchBox('pbSearchInput', 'Search videos/devices...', 'pb-search')}</div></div>
-            <table><thead><tr><th>Video Title</th><th>Plugin</th><th>Source</th><th>License</th><th>Device</th><th>IP</th><th>Time</th></tr></thead>
+            <table><thead><tr><th>Video Title</th><th>Plugin</th><th>Source</th><th>License</th><th>Device</th><th>IP</th><th>Time (WIB)</th></tr></thead>
             <tbody>${rows || '<tr><td colspan="7"><div class="empty-state"><p>No playback logs</p></div></td></tr>'}</tbody></table>
             <div class="table-footer"><span>Page ${page} of ${tp || 1}</span>${pagBtns(page, tp, 'pb-page')}</div>
         </div>`;
@@ -1271,15 +1311,15 @@ async function renderAccessLogs(page = 1) {
         let rows = data.logs?.length ? data.logs.map(l => `<tr>
             <td><span class="badge badge-info">${esc(l.action)}</span></td>
             <td>${l.license_key ? `<span class="license-key" data-action="copy" data-value="${esc(l.license_key)}">${esc(l.license_name || l.license_key?.substring(0, 15))}</span>` : '-'}</td>
-            <td title="${esc(l.device_id)}">${esc(l.device_name || l.device_id?.substring(0, 16) || '-')}</td>
+            <td title="ID: ${esc(l.device_id)}">${esc(deviceLabel(l.device_name, l.device_id))}</td>
             <td>${esc(l.ip_address)}</td>
             <td title="${esc(l.details)}">${esc(l.details?.substring(0, 60) || '-')}</td>
-            <td>${timeAgo(l.created_at)}</td>
+            <td style="white-space:nowrap">${formatWIB(l.created_at)}</td>
         </tr>`).join('') : '';
 
         c.innerHTML = `<div class="table-container">
             <div class="table-header"><h3>Access Logs (${data.total})</h3><div class="table-actions">${searchBox('alSearchInput', 'Search logs/devices...', 'al-search')}</div></div>
-            <table><thead><tr><th>Action</th><th>License</th><th>Device</th><th>IP</th><th>Details</th><th>Time</th></tr></thead>
+            <table><thead><tr><th>Action</th><th>License</th><th>Device</th><th>IP</th><th>Details</th><th>Time (WIB)</th></tr></thead>
             <tbody>${rows || '<tr><td colspan="6"><div class="empty-state"><p>No logs</p></div></td></tr>'}</tbody></table>
             <div class="table-footer"><span>Page ${page} of ${tp || 1}</span>${pagBtns(page, tp, 'al-page')}</div>
         </div>`;
@@ -1534,41 +1574,67 @@ async function viewUserActivity(licenseKey) {
     try {
         const d = await apiFetch('/api/admin/analytics/user/' + encodeURIComponent(licenseKey) + '?days=7');
 
+        // Plugin usage with device info
         let pluginRows = '';
         if (d.pluginUsage && d.pluginUsage.length) {
-            pluginRows = '<table style="font-size:12px"><thead><tr><th>Plugin</th><th>Action</th><th>Count</th><th>Last Used</th></tr></thead><tbody>' +
-                d.pluginUsage.map(p =>
-                    '<tr><td>' + esc(p.plugin_name) + '</td><td><span class="badge badge-info">' + esc(p.action) + '</span></td>' +
-                    '<td>' + p.count + '</td><td>' + timeAgo(p.last_used) + '</td></tr>'
-                ).join('') + '</tbody></table>';
+            pluginRows = '<table style="font-size:12px"><thead><tr><th>Plugin</th><th>Action</th><th>Device</th><th>Count</th><th>Last Used (WIB)</th></tr></thead><tbody>' +
+                d.pluginUsage.map(p => {
+                    return '<tr><td>' + esc(p.plugin_name) + '</td>' +
+                        '<td><span class="badge badge-info">' + esc(p.action) + '</span></td>' +
+                        '<td title="ID: ' + esc(p.device_id || '') + '">' + esc(deviceLabel(p.device_name, p.device_id)) + '</td>' +
+                        '<td style="font-weight:600;color:var(--accent)">' + p.count + '</td>' +
+                        '<td style="white-space:nowrap">' + formatWIB(p.last_used) + '</td></tr>';
+                }).join('') + '</tbody></table>';
         } else {
             pluginRows = '<div class="empty-state"><p>No plugin activity</p></div>';
         }
 
+        // Playback history with device info
         let playbackRows = '';
         if (d.playbackHistory && d.playbackHistory.length) {
-            playbackRows = '<table style="font-size:12px"><thead><tr><th>Video</th><th>Plugin</th><th>Source</th><th>Time</th></tr></thead><tbody>' +
-                d.playbackHistory.slice(0, 30).map(p =>
-                    '<tr><td title="' + esc(p.video_title) + '">' + esc(p.video_title?.substring(0, 35)) + '</td>' +
-                    '<td>' + esc(p.plugin_name) + '</td>' +
-                    '<td>' + (p.source_provider === 'DOWNLOAD' ? '<span class="badge badge-expired">DOWNLOAD</span>' : esc(p.source_provider || 'PLAY')) + '</td>' +
-                    '<td>' + timeAgo(p.played_at) + '</td></tr>'
-                ).join('') + '</tbody></table>';
+            playbackRows = '<table style="font-size:12px"><thead><tr><th>Video</th><th>Plugin</th><th>Device</th><th>Type</th><th>IP</th><th>Time (WIB)</th></tr></thead><tbody>' +
+                d.playbackHistory.slice(0, 50).map(p => {
+                    var typeBadge = p.source_provider === 'DOWNLOAD' ? '<span class="badge badge-expired">DOWNLOAD</span>' : '<span class="badge badge-info">PLAY</span>';
+                    return '<tr><td title="' + esc(p.video_title) + '">' + esc(p.video_title?.substring(0, 30)) + '</td>' +
+                        '<td>' + esc(p.plugin_name) + '</td>' +
+                        '<td title="ID: ' + esc(p.device_id || '') + '">' + esc(deviceLabel(p.device_name, p.device_id)) + '</td>' +
+                        '<td>' + typeBadge + '</td>' +
+                        '<td style="color:var(--text-muted);font-size:11px">' + esc(p.ip_address || '-') + '</td>' +
+                        '<td style="white-space:nowrap">' + formatWIB(p.played_at) + '</td></tr>';
+                }).join('') + '</tbody></table>';
         } else {
             playbackRows = '<div class="empty-state"><p>No playback history</p></div>';
         }
 
+        // Devices
         let deviceRows = '';
         if (d.devices && d.devices.length) {
-            deviceRows = '<table style="font-size:12px"><thead><tr><th>Device</th><th>IP</th><th>Last Seen</th><th>Status</th></tr></thead><tbody>' +
-                d.devices.map(dev =>
-                    '<tr><td>' + esc(dev.device_name || dev.device_id?.substring(0, 16)) + '</td>' +
+            deviceRows = '<table style="font-size:12px"><thead><tr><th>Device</th><th>Device ID</th><th>IP</th><th>First Seen (WIB)</th><th>Last Seen (WIB)</th><th>Status</th></tr></thead><tbody>' +
+                d.devices.map((dev, i) =>
+                    '<tr><td style="font-weight:500;color:var(--text-primary)">' + esc(deviceLabel(dev.device_name, dev.device_id, i)) + '</td>' +
+                    '<td style="font-family:monospace;font-size:11px;color:var(--text-muted)">' + esc(dev.device_id?.substring(0, 16) || '-') + '</td>' +
                     '<td>' + esc(dev.ip_address) + '</td>' +
-                    '<td>' + timeAgo(dev.last_seen) + '</td>' +
+                    '<td style="white-space:nowrap">' + formatWIB(dev.first_seen) + '</td>' +
+                    '<td style="white-space:nowrap">' + formatWIB(dev.last_seen) + '</td>' +
                     '<td>' + (dev.is_blocked ? '<span class="badge badge-blocked">Blocked</span>' : '<span class="badge badge-active">Active</span>') + '</td></tr>'
                 ).join('') + '</tbody></table>';
         } else {
             deviceRows = '<div class="empty-state"><p>No devices</p></div>';
+        }
+
+        // Access logs with device info
+        let logRows = '';
+        if (d.recentLogs && d.recentLogs.length) {
+            logRows = '<table style="font-size:12px"><thead><tr><th>Action</th><th>Device</th><th>IP</th><th>Details</th><th>Time (WIB)</th></tr></thead><tbody>' +
+                d.recentLogs.slice(0, 30).map(lg => {
+                    return '<tr><td><span class="badge badge-info">' + esc(lg.action) + '</span></td>' +
+                        '<td title="ID: ' + esc(lg.device_id || '') + '">' + esc(deviceLabel(lg.device_name, lg.device_id)) + '</td>' +
+                        '<td style="color:var(--text-muted);font-size:11px">' + esc(lg.ip_address) + '</td>' +
+                        '<td title="' + esc(lg.details) + '">' + esc(lg.details?.substring(0, 40) || '-') + '</td>' +
+                        '<td style="white-space:nowrap">' + formatWIB(lg.created_at) + '</td></tr>';
+                }).join('') + '</tbody></table>';
+        } else {
+            logRows = '<div class="empty-state"><p>No access logs</p></div>';
         }
 
         const mc = document.getElementById('modalContent');
@@ -1578,17 +1644,21 @@ async function viewUserActivity(licenseKey) {
             '<button class="btn-icon" data-action="close-modal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>' +
             '<div class="modal-body" style="padding:0">' +
             '<div style="padding:20px 24px;border-bottom:1px solid var(--border)">' +
+            '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">' +
             '<div style="font-family:monospace;font-size:15px;font-weight:600;color:var(--accent)">' + esc(licenseKey) + '</div>' +
-            '<div style="font-size:12px;color:var(--text-muted);margin-top:4px">' + esc(d.license?.name || 'Unnamed') + ' · ' + statusBadge(d.license?.status || 'unknown') + ' · Period: ' + esc(d.period) + '</div></div>' +
+            '<div>' + statusBadge(d.license?.status || 'unknown') + '</div></div>' +
+            '<div style="font-size:12px;color:var(--text-muted);margin-top:6px">' + esc(d.license?.name || 'Unnamed') + ' · Period: ' + esc(d.period) + ' · Devices: ' + (d.devices?.length || 0) + '/' + (d.license?.max_devices || '-') + '</div></div>' +
             '<div style="padding:20px 24px">' +
             '<div class="inline-tabs">' +
             '<button class="inline-tab active" data-action="detail-tab" data-value="ua-plugins">Plugin Usage (' + (d.pluginUsage?.length || 0) + ')</button>' +
             '<button class="inline-tab" data-action="detail-tab" data-value="ua-playback">Playback (' + (d.playbackHistory?.length || 0) + ')</button>' +
             '<button class="inline-tab" data-action="detail-tab" data-value="ua-devices">Devices (' + (d.devices?.length || 0) + ')</button>' +
+            '<button class="inline-tab" data-action="detail-tab" data-value="ua-logs">Access Logs (' + (d.recentLogs?.length || 0) + ')</button>' +
             '</div>' +
             '<div class="tab-panel active" data-tab="ua-plugins">' + pluginRows + '</div>' +
             '<div class="tab-panel" data-tab="ua-playback">' + playbackRows + '</div>' +
             '<div class="tab-panel" data-tab="ua-devices">' + deviceRows + '</div>' +
+            '<div class="tab-panel" data-tab="ua-logs">' + logRows + '</div>' +
             '</div></div>' +
             '<div class="modal-footer"><button class="btn btn-secondary" data-action="close-modal">Close</button></div>';
     } catch (e) {

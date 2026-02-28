@@ -11,6 +11,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const path = require('path');
 const os = require('os');
+const cookieParser = require('cookie-parser');
 const db = require('./database');
 
 // ============================================================
@@ -34,6 +35,26 @@ app.use(helmet({
 
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
+app.use(cookieParser());   // ← parse cookies from CloudStream requests
+
+// === TEMPORARY DEBUG LOGGER ===
+app.use((req, res, next) => {
+    // Skip static files
+    if (!req.path.startsWith('/api') && !req.path.startsWith('/r/')) return next();
+    const info = {
+        method: req.method,
+        path: req.path,
+        query: req.query,
+        body_keys: req.body ? Object.keys(req.body) : [],
+        device_id: req.query.device_id || req.body?.device_id || '(none)',
+        key: req.query.key || req.body?.key || req.params?.key || '(none)',
+        ip: req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip
+    };
+    console.log(`[REQ] ${req.method} ${req.path}`, JSON.stringify(info));
+    next();
+});
+// === END DEBUG LOGGER ===
+
 app.use((req, res, next) => {
     // Normalize URL path: replace double slashes with single slash, ignore query params
     const qIndex = req.url.indexOf('?');
@@ -45,7 +66,17 @@ app.use((req, res, next) => {
     }
     next();
 });
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), {
+    setHeaders: (res, pathStr) => {
+        if (pathStr.endsWith('.html')) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            res.setHeader('Pragma', 'no-cache');
+            res.setHeader('Expires', '0');
+        } else if (pathStr.includes('/assets/')) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        }
+    }
+}));
 
 // ============================================================
 // RATE LIMITING
@@ -113,6 +144,14 @@ function cleanInput(val) {
     return val.trim().substring(0, 500);
 }
 
+// Safely decode URL-encoded plugin names and strip non-ASCII characters (like emojis)
+function safeDecodePlugin(val) {
+    if (!val) return val;
+    let decoded = val;
+    try { decoded = decodeURIComponent(val.trim()); } catch { decoded = val.trim(); }
+    return decoded.replace(/[^\x00-\x7F]/g, "").trim().substring(0, 500);
+}
+
 function getLocalIP() {
     const interfaces = os.networkInterfaces();
     for (const name of Object.keys(interfaces)) {
@@ -126,49 +165,63 @@ function getLocalIP() {
 }
 
 // ============================================================
-// IP SESSION CACHE (for check-ip fast path)
+// DEVICE IDENTIFICATION (COOKIE-BASED TRACKING)
 // ============================================================
+// STRICT COOKIE TRACKING
+// ============================================================
+// To completely eradicate IP tracking, we generate a permanent Cookie-based Device ID 
+// the absolute FIRST time CloudStream accesses the repository (repo.json).
+// This cookie replaces the Native Sandbox ID and is the only absolute truth for device identity.
 
-const ipSessions = new Map();
+function getOrCreateDeviceCookie(req, res) {
+    let deviceId = req.cookies && req.cookies.cs_device_id;
 
-function createIPSession(ip, key, durationMs = 24 * 60 * 60 * 1000) {
-    ipSessions.set(ip, { key, expiresAt: Date.now() + durationMs });
+    // If no cookie exists, generate a new one and tell CloudStream to save it forever
+    if (!deviceId) {
+        deviceId = 'cs_' + crypto.randomBytes(8).toString('hex');
+        if (res && typeof res.cookie === 'function') {
+            res.cookie('cs_device_id', deviceId, {
+                maxAge: 10 * 365 * 24 * 60 * 60 * 1000, // 10 years
+                httpOnly: true,
+                sameSite: 'None',
+                secure: true
+            });
+        }
+    }
+    return deviceId;
 }
 
-function getIPSession(ip) {
-    const session = ipSessions.get(ip);
-    if (!session) return null;
-    if (Date.now() > session.expiresAt) {
-        ipSessions.delete(ip);
-        return null;
+// Function to clear cookies for testing or manual wipe
+function clearDeviceCookie(res) {
+    if (res && typeof res.clearCookie === 'function') {
+        res.clearCookie('cs_device_id');
     }
-    return session;
 }
 
-// Cleanup expired sessions every 10 minutes
-setInterval(() => {
-    const now = Date.now();
-    for (const [ip, s] of ipSessions) {
-        if (now > s.expiresAt) ipSessions.delete(ip);
-    }
-}, 600000);
-
-// ============================================================
+// Removed ipSessions cleanup// ============================================================
 // PUBLIC API — License Validation
 // ============================================================
 
 app.post('/api/validate', rateLimit(60000, 30), (req, res) => {
     try {
         const key = cleanInput(req.body.key);
-        const deviceId = cleanInput(req.body.device_id);
+        let deviceId = cleanInput(req.body.device_id);
         const deviceName = cleanInput(req.body.device_name);
         const ip = getClientIP(req);
+
+        // STRICT COOKIE TRACKING: The cookie ID generated at `repo.json` is the absolute truth.
+        const cookieId = getOrCreateDeviceCookie(req, res);
+        if (cookieId) {
+            deviceId = cookieId;
+        } else if (!deviceId || deviceId.toLowerCase() === 'unknown' || deviceId.toLowerCase() === 'null') {
+            return res.json({ status: 'error', message: 'Device ID required. Please enter Repo URL first.' });
+        }
 
         if (!key) {
             return res.json({ status: 'error', message: 'License key required' });
         }
 
-        const result = db.validateLicense(key, ip, deviceId, deviceName);
+        const result = db.validateLicense(key, ip, deviceId, deviceName, 'VALIDATE');
 
         if (!result.valid) {
             const messages = {
@@ -179,13 +232,15 @@ app.post('/api/validate', rateLimit(60000, 30), (req, res) => {
                 device_blocked: 'This device has been blocked',
                 ip_blocked: 'Your IP has been blocked'
             };
-            db.logAccess(key, 'VALIDATE_FAIL', ip, result.reason);
+            db.logAccess(key, 'VALIDATE_FAIL', ip, `reason:${result.reason} device:${deviceId}`, deviceId);
             return res.json({ status: 'error', message: messages[result.reason] || 'Access denied', reason: result.reason });
         }
 
-        // Create IP session for fast check-ip path
-        createIPSession(ip, key);
-        db.logAccess(key, 'VALIDATE_OK', ip, `device: ${deviceId}`, deviceId);
+        // Create IP session so plugins can discover their key later
+        createIPSession(ip, key, deviceId);
+
+        const action = result.isNewDevice ? 'DEVICE_REGISTERED' : 'VALIDATE_OK';
+        db.logAccess(key, action, ip, `device:${deviceId} name:${deviceName}`, deviceId);
 
         res.json({
             status: 'active',
@@ -207,26 +262,31 @@ app.post('/api/validate', rateLimit(60000, 30), (req, res) => {
 app.post('/api/heartbeat', rateLimit(60000, 60), (req, res) => {
     try {
         const key = cleanInput(req.body.key);
-        const deviceId = cleanInput(req.body.device_id);
+        let deviceId = cleanInput(req.body.device_id);
         const ip = getClientIP(req);
+
+        // STRICT COOKIE TRACKING
+        const cookieId = getOrCreateDeviceCookie(req, res);
+        if (cookieId) {
+            deviceId = cookieId;
+        } else if (!deviceId || deviceId.toLowerCase() === 'unknown' || deviceId.toLowerCase() === 'null') {
+            return res.json({ status: 'error', message: 'Device ID required' });
+        }
 
         if (!key) return res.json({ status: 'error', message: 'Key required' });
 
-        const lic = db.getLicenseByKey(key);
-        if (!lic) return res.json({ status: 'error', reason: 'not_found' });
-        if (lic.status !== 'active') return res.json({ status: 'error', reason: lic.status });
-
-        const now = new Date();
-        const expiry = new Date(lic.expires_at);
-        if (now > expiry) {
-            db.updateLicenseStatus(lic.id, 'expired');
-            return res.json({ status: 'error', reason: 'expired' });
+        // Full license re-validation on every heartbeat
+        const result = db.validateLicense(key, ip, deviceId, '', 'HEARTBEAT');
+        if (!result.valid) {
+            ipSessions.delete(ip);
+            return res.json({ status: 'error', reason: result.reason });
         }
 
         // Refresh IP session
         createIPSession(ip, key);
+        db.logAccess(key, 'HEARTBEAT', ip, `device:${deviceId}`, deviceId);
 
-        res.json({ status: 'active', days_left: Math.ceil((expiry - now) / 86400000) });
+        res.json({ status: 'active', days_left: result.daysLeft });
     } catch (e) {
         console.error('Heartbeat error:', e.message);
         res.status(500).json({ status: 'error', message: 'Server error' });
@@ -240,70 +300,77 @@ app.post('/api/heartbeat', rateLimit(60000, 60), (req, res) => {
 app.get('/api/check-ip', rateLimit(60000, 120), (req, res) => {
     try {
         const ip = getClientIP(req);
-        const deviceId = cleanInput(req.query.device_id || '');
+        let deviceId = cleanInput(req.query.device_id || '');
+
+        // The plugin now sends a persistent UUID via SharedPreferences.
+        // If it still sends 'unknown' (old plugin version), reject it.
+        if (!deviceId || deviceId.toLowerCase() === 'unknown' || deviceId.toLowerCase() === 'null') {
+            return res.json({ status: 'error', message: 'Device ID tidak valid. Update plugin terbaru.' });
+        }
+
         const pluginName = cleanInput(req.query.plugin || '');
-        const action = cleanInput(req.query.action || '');
+        const action = cleanInput(req.query.action || '').toUpperCase();
         const data = cleanInput(req.query.data || '');
-        const keyParam = cleanInput(req.query.key || '');
+        const key = cleanInput(req.query.key || '');
+
+        if (!key) {
+            db.logAccess('', 'NO_KEY', ip, `device:${deviceId} plugin:${pluginName} action:${action}`, deviceId);
+            return res.json({ status: 'error', message: 'Lisensi tidak ditemukan di plugin.' });
+        }
 
         // Check IP blocked
         if (db.isIPBlocked(ip)) {
+            db.logAccess(key, 'IP_BLOCKED', ip, `device:${deviceId}`, deviceId);
             return res.json({ status: 'error', message: 'IP blocked' });
         }
 
-        // Try IP session first (fast path)
-        let session = getIPSession(ip);
-
-        // Fallback: if no session but key provided, validate the key
-        if (!session && keyParam) {
-            const result = db.validateLicense(keyParam, ip, deviceId, 'Android');
-            if (result.valid) {
-                createIPSession(ip, keyParam);
-                session = getIPSession(ip);
-                db.logAccess(keyParam, 'VALIDATE_OK', ip, `plugin: ${pluginName}`, deviceId);
-            } else {
-                const messages = {
-                    not_found: 'License key not found',
-                    revoked: 'License has been revoked',
-                    expired: 'License has expired',
-                    max_devices: 'Maximum device limit reached',
-                    device_blocked: 'This device has been blocked',
-                    ip_blocked: 'Your IP has been blocked'
-                };
-                return res.json({ status: 'error', message: messages[result.reason] || 'Access denied' });
-            }
+        // Full license validation
+        const result = db.validateLicense(key, ip, deviceId, 'CloudStream Sandbox', 'CHECK_IP');
+        if (!result.valid) {
+            const messages = {
+                not_found: 'Lisensi tidak ditemukan',
+                revoked: 'Lisensi telah dicabut oleh admin',
+                expired: 'Lisensi telah kadaluarsa. Silakan perpanjang.',
+                max_devices: 'Batas perangkat tercapai untuk lisensi ini',
+                device_blocked: 'Perangkat ini telah diblokir',
+                ip_blocked: 'IP anda diblokir'
+            };
+            db.logAccess(key, 'CHECK_IP_FAIL', ip, `reason:${result.reason} plugin:${pluginName} action:${action}`, deviceId);
+            return res.json({ status: 'error', message: messages[result.reason] || 'Access denied', reason: result.reason });
         }
 
-        if (!session) {
-            return res.json({ status: 'error', message: 'No active session. Please validate license.' });
+        if (result.isNewDevice) {
+            db.logAccess(key, 'DEVICE_REGISTERED', ip, `device:${deviceId} plugin:${pluginName} via check-ip`, deviceId);
         }
 
-        // Validate license is still good
-        const lic = db.getLicenseByKey(session.key);
-        if (!lic || lic.status !== 'active') {
-            ipSessions.delete(ip);
-            return res.json({ status: 'error', message: 'License inactive' });
-        }
-
+        const lic = result.license;
+        const now = new Date();
         const expiry = new Date(lic.expires_at);
-        if (new Date() > expiry) {
-            db.updateLicenseStatus(lic.id, 'expired');
-            ipSessions.delete(ip);
-            return res.json({ status: 'error', message: 'License expired' });
+        const daysLeft = Math.ceil((expiry - now) / 86400000);
+
+        // Track all plugin actions with full detail
+        if (action && action !== 'CHECK') {
+            const trackableActions = ['HOME', 'OPEN', 'SEARCH', 'LOAD', 'PLAY', 'SWITCH', 'DOWNLOAD'];
+            if (pluginName && trackableActions.includes(action)) {
+                db.trackPluginUsage(session.key, deviceId, pluginName, action, ip);
+            }
+
+            if (action === 'HOME') {
+                db.logAccess(session.key, 'HOME_ACCESS', ip, `plugin:${pluginName} device:${deviceId}`, deviceId);
+            } else if (action === 'SWITCH') {
+                db.logAccess(session.key, 'PLUGIN_SWITCH', ip, `plugin:${pluginName} device:${deviceId}`, deviceId);
+            } else if (action === 'DOWNLOAD' || action === 'PLAY') {
+                db.logAccess(session.key, action, ip, `plugin:${pluginName} data:${data} device:${deviceId}`, deviceId);
+                if (data) {
+                    db.trackPlayback(session.key, deviceId, pluginName, data,
+                        action === 'DOWNLOAD' ? 'DOWNLOAD' : '', ip);
+                }
+            } else if (action === 'SEARCH') {
+                db.logAccess(session.key, 'SEARCH', ip, `plugin:${pluginName} query:${data} device:${deviceId}`, deviceId);
+            }
         }
 
-        // Track plugin activity
-        if (pluginName && action && action !== 'check') {
-            const actionUpper = action.toUpperCase();
-            if (['HOME', 'OPEN', 'SEARCH', 'LOAD', 'PLAY', 'SWITCH', 'DOWNLOAD'].includes(actionUpper)) {
-                db.trackPluginUsage(session.key, deviceId, pluginName, actionUpper, ip);
-            }
-            if ((actionUpper === 'PLAY' || actionUpper === 'DOWNLOAD') && data) {
-                db.trackPlayback(session.key, deviceId, pluginName, data, actionUpper === 'DOWNLOAD' ? 'DOWNLOAD' : '', ip);
-            }
-        }
-
-        res.json({ status: 'active', message: 'Valid', expiry: lic.expires_at });
+        res.json({ status: 'active', message: 'Valid', expiry: lic.expires_at, days_left: daysLeft });
     } catch (e) {
         console.error('Check-IP error:', e.message);
         res.status(500).json({ status: 'error', message: 'Server error' });
@@ -343,13 +410,18 @@ app.get('/api/key-by-ip', rateLimit(60000, 30), (req, res) => {
 app.post('/api/track/plugin', rateLimit(60000, 60), (req, res) => {
     try {
         const key = cleanInput(req.body.key);
-        const deviceId = cleanInput(req.body.device_id);
-        const pluginName = cleanInput(req.body.plugin_name);
-        const action = cleanInput(req.body.action || 'OPEN');
         const ip = getClientIP(req);
+        const deviceId = getSafeDeviceId(req, req.body.device_id);
+        const pluginName = safeDecodePlugin(req.body.plugin_name);
+        const action = cleanInput(req.body.action || 'OPEN');
 
         if (!key || !pluginName) {
             return res.json({ status: 'error', message: 'Missing fields' });
+        }
+
+        const result = db.validateLicense(key, ip, deviceId, 'Android');
+        if (!result.valid) {
+            return res.json({ status: 'error', message: result.reason });
         }
 
         db.trackPluginUsage(key, deviceId, pluginName, action.toUpperCase(), ip);
@@ -367,14 +439,20 @@ app.post('/api/track/plugin', rateLimit(60000, 60), (req, res) => {
 app.post('/api/track/playback', rateLimit(60000, 60), (req, res) => {
     try {
         const key = cleanInput(req.body.key);
-        const deviceId = cleanInput(req.body.device_id);
-        const pluginName = cleanInput(req.body.plugin_name);
+        const ip = getClientIP(req);
+        const deviceId = getSafeDeviceId(req, req.body.device_id);
+
+        const pluginName = safeDecodePlugin(req.body.plugin_name);
         const videoTitle = cleanInput(req.body.video_title);
         const sourceProvider = cleanInput(req.body.source_provider);
-        const ip = getClientIP(req);
 
         if (!key || !pluginName || !videoTitle) {
             return res.json({ status: 'error', message: 'Missing fields' });
+        }
+
+        const result = db.validateLicense(key, ip, deviceId, 'Android');
+        if (!result.valid) {
+            return res.json({ status: 'error', message: result.reason });
         }
 
         db.trackPlayback(key, deviceId, pluginName, videoTitle, sourceProvider, ip);
@@ -425,8 +503,27 @@ app.get('/r/:key/repo.json', rateLimit(60000, 60), (req, res) => {
 
         const serverUrl = db.getSetting('server_url') || `http://${getLocalIP()}:${PORT}`;
         const ip = getClientIP(req);
-        createIPSession(ip, key);
-        db.logAccess(key, 'REPO_ACCESS', ip, 'repo.json');
+
+        // STRICT COOKIE TRACKING: Tag the device exactly when they paste the URL
+        const deviceId = getOrCreateDeviceCookie(req, res);
+        const deviceName = `Browser / CloudStream (${deviceId.substring(3, 8)})`;
+
+        const result = db.validateLicense(key, ip, deviceId, deviceName, 'REPO');
+
+        if (!result.valid) {
+            const messages = {
+                not_found: 'Invalid license',
+                revoked: 'License revoked',
+                expired: 'License expired',
+                max_devices: 'Device limit reached for this license',
+                device_blocked: 'This device has been blocked',
+                ip_blocked: 'Access denied'
+            };
+            db.logAccess(key, 'REPO_DENY', ip, `reason:${result.reason}`, deviceId);
+            return res.json({ status: 'error', message: messages[result.reason] || 'Access denied' });
+        }
+
+        db.logAccess(key, 'REPO_ACCESS', ip, `device:${deviceId}`, deviceId);
 
         res.json({
             name: "Premium Extensions",
@@ -439,6 +536,131 @@ app.get('/r/:key/repo.json', rateLimit(60000, 60), (req, res) => {
         res.status(500).json({ status: 'error', message: 'Server error' });
     }
 });
+
+// ============================================================
+// TOKEN-BASED REPO GATING — /r/:key/:token/repo.json
+// This is the RELIABLE method: token in URL = device identity.
+// Works through VPN, WiFi, shared IP, carrier NAT — anything.
+// ============================================================
+
+app.get('/r/:key/:token/repo.json', rateLimit(60000, 60), (req, res) => {
+    try {
+        const key = req.params.key;
+        const token = req.params.token;
+        const ip = getClientIP(req);
+
+        // 1. Full license validation (not just status check)
+        const lic = db.getLicenseByKey(key);
+        if (!lic) {
+            db.logAccess(key, 'TOKEN_DENY', ip, `token:${token} reason:not_found`);
+            return res.json({ status: 'error', message: 'Invalid license' });
+        }
+        if (lic.status === 'revoked') {
+            db.logAccess(key, 'TOKEN_DENY', ip, `token:${token} reason:revoked`);
+            return res.json({ status: 'error', message: 'License revoked' });
+        }
+        const now = new Date();
+        if (now > new Date(lic.expires_at)) {
+            db.updateLicenseStatus(lic.id, 'expired');
+            db.logAccess(key, 'TOKEN_DENY', ip, `token:${token} reason:expired`);
+            return res.json({ status: 'error', message: 'License expired. Please renew your subscription.' });
+        }
+
+        // 2. Validate device token
+        const tokenResult = db.validateDeviceToken(key, token, ip);
+        if (!tokenResult.valid) {
+            const msgs = {
+                invalid_token: 'Link device tidak valid. Minta link baru ke admin.',
+                device_blocked: 'Device ini telah diblokir oleh admin.'
+            };
+            db.logAccess(key, 'TOKEN_DENY', ip, `token:${token} reason:${tokenResult.reason}`);
+            return res.json({ status: 'error', message: msgs[tokenResult.reason] || 'Akses ditolak' });
+        }
+        const serverUrl = db.getSetting('server_url') || `http://${getLocalIP()}:${PORT}`;
+        db.logAccess(key, 'TOKEN_REPO_ACCESS', ip, `token:${token} label:${tokenResult.token.label}`);
+
+        res.json({
+            name: "Premium Extensions",
+            description: "CloudStream Premium Extensions",
+            manifestVersion: 1,
+            pluginLists: [`${serverUrl}/r/${key}/${token}/plugins.json`]
+        });
+    } catch (e) {
+        console.error('Token repo error:', e.message);
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+app.get('/r/:key/:token/plugins.json', rateLimit(60000, 60), async (req, res) => {
+    try {
+        const key = req.params.key;
+        const token = req.params.token;
+        const ip = getClientIP(req);
+
+        // Full license validation for download plugin gate
+        const lic = db.getLicenseByKey(key);
+        if (!lic) {
+            db.logAccess(key, 'TOKEN_PLUGIN_DENY', ip, `token:${token} reason:not_found`);
+            return res.json([]);
+        }
+        if (lic.status === 'revoked') {
+            db.logAccess(key, 'LICENSE_REVOKED', ip, `token:${token}`);
+            return res.json([]);
+        }
+        const nowCheck = new Date();
+        if (nowCheck > new Date(lic.expires_at)) {
+            db.updateLicenseStatus(lic.id, 'expired');
+            db.logAccess(key, 'LICENSE_EXPIRED', ip, `token:${token}`);
+            return res.json([]);
+        }
+
+        // Validate device token
+        const tokenResult = db.validateDeviceToken(key, token, ip);
+        if (!tokenResult.valid) {
+            db.logAccess(key, 'TOKEN_PLUGIN_DENY', ip, `token:${token} reason:${tokenResult.reason}`);
+            return res.json([]);
+        }
+
+        db.logAccess(key, 'TOKEN_PLUGIN_LIST_ACCESS', ip, `token:${token} label:${tokenResult.token.label}`);
+
+        // Fetch from upstream repositories
+        let upstreamUrls = [];
+        try {
+            const setting = db.getSetting('upstream_urls');
+            if (setting) upstreamUrls = JSON.parse(setting);
+        } catch (e) {
+            const legacy = db.getSetting('upstream_plugins_url');
+            if (legacy) upstreamUrls = [{ url: legacy, active: true }];
+        }
+
+        if (!Array.isArray(upstreamUrls) || upstreamUrls.length === 0) {
+            upstreamUrls = [{ url: 'https://raw.githubusercontent.com/Makairamei/CS/builds/plugins.json', active: true }];
+        }
+
+        const fetchPromises = upstreamUrls
+            .filter(u => u.active && u.url)
+            .map(async (u) => {
+                try {
+                    const r = await fetch(u.url, { signal: AbortSignal.timeout(5000) });
+                    if (!r.ok) return [];
+                    const json = await r.json();
+                    return Array.isArray(json) ? json : [];
+                } catch (err) {
+                    console.error(`Failed to fetch upstream ${u.url}:`, err.message);
+                    return [];
+                }
+            });
+
+        const results = await Promise.all(fetchPromises);
+        const pluginMap = new Map();
+        results.flat().forEach(p => { if (p && p.internalName) pluginMap.set(p.internalName, p); });
+        res.json(Array.from(pluginMap.values()));
+    } catch (e) {
+        console.error('Token plugins error:', e.message);
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
 
 app.get('/r/:key/plugins.json', rateLimit(60000, 60), async (req, res) => {
     try {
@@ -454,6 +676,12 @@ app.get('/r/:key/plugins.json', rateLimit(60000, 60), async (req, res) => {
             db.updateLicenseStatus(lic.id, 'expired');
             return res.status(403).json({ status: 'error', message: 'License expired' });
         }
+
+        const ip = getClientIP(req);
+
+        // STRICT COOKIE TRACKING: Ensure the Cookie ID is sent and logged
+        const deviceId = getOrCreateDeviceCookie(req, res);
+        db.logAccess(key, 'PLUGIN_LIST_ACCESS', ip, `device:${deviceId}`, deviceId);
 
         // Fetch from upstream repositories
         let upstreamUrls = [];
@@ -545,6 +773,7 @@ app.post('/api/auth/login', rateLimit(300000, 20), (req, res) => {
         if (!admin || !bcrypt.compareSync(password, admin.password_hash)) {
             db.recordFailedLogin(ip);
             db.logAccess('', 'LOGIN_FAIL', ip, `username: ${username}`);
+            db.logAdminAction(username, 'LOGIN_FAILED', 'Invalid credentials', ip);
             return res.status(401).json({ status: 'error', message: 'Invalid credentials' });
         }
 
@@ -553,6 +782,7 @@ app.post('/api/auth/login', rateLimit(300000, 20), (req, res) => {
 
         const token = jwt.sign({ id: admin.id, username: admin.username }, JWT_SECRET, { expiresIn: JWT_EXPIRY });
         db.logAccess('', 'LOGIN_OK', ip, `admin: ${username}`);
+        db.logAdminAction(admin.username, 'LOGIN', 'Successful login', ip);
 
         res.json({ status: 'ok', token, username: admin.username });
     } catch (e) {
@@ -592,6 +822,7 @@ app.post('/api/admin/licenses', authMiddleware, (req, res) => {
                 note: note || ''
             });
             db.logAccess('', 'BULK_CREATE', ip, `${keys.length} licenses created by ${req.admin.username}`);
+            db.logAdminAction(req.admin.username, 'CREATE_BULK_LICENSES', `Created ${keys.length} licenses (${duration_days || 30} days, ${max_devices || 2} max devices).\n\nGenerated Keys:\n${keys.join('\n')}`, ip);
             return res.json({ status: 'ok', keys });
         }
 
@@ -603,6 +834,7 @@ app.post('/api/admin/licenses', authMiddleware, (req, res) => {
         });
 
         db.logAccess(result.key, 'LICENSE_CREATE', ip, `by ${req.admin.username}`);
+        db.logAdminAction(req.admin.username, 'CREATE_LICENSE', `Created license ${result.key} (${name || 'Unnamed'} - ${duration_days || 30} days)`, ip);
         res.json({ status: 'ok', ...result });
     } catch (e) {
         console.error('Create license error:', e.message);
@@ -646,12 +878,15 @@ app.put('/api/admin/licenses/:id', authMiddleware, (req, res) => {
         if (action === 'revoke') {
             db.updateLicenseStatus(id, 'revoked');
             db.logAccess('', 'LICENSE_REVOKE', ip, `id:${id} by ${req.admin.username}`);
+            db.logAdminAction(req.admin.username, 'REVOKE_LICENSE', `Revoked license ID: ${id}`, ip);
         } else if (action === 'activate') {
             db.updateLicenseStatus(id, 'active');
             db.logAccess('', 'LICENSE_ACTIVATE', ip, `id:${id} by ${req.admin.username}`);
+            db.logAdminAction(req.admin.username, 'ACTIVATE_LICENSE', `Activated license ID: ${id}`, ip);
         } else if (action === 'restore') {
             db.restoreLicense(id);
             db.logAccess('', 'LICENSE_RESTORE', ip, `id:${id} by ${req.admin.username}`);
+            db.logAdminAction(req.admin.username, 'RESTORE_LICENSE', `Restored license ID: ${id}`, ip);
         } else {
             db.updateLicense(id, {
                 name, note,
@@ -660,6 +895,7 @@ app.put('/api/admin/licenses/:id', authMiddleware, (req, res) => {
                 status: newStatus
             });
             db.logAccess('', 'LICENSE_UPDATE', ip, `id:${id} by ${req.admin.username}`);
+            db.logAdminAction(req.admin.username, 'UPDATE_LICENSE', `Updated details for license ID: ${id}.\nNew values: Status=${newStatus}, MaxDevices=${max_devices}, Expires=${expires_at}`, ip);
         }
 
         res.json({ status: 'ok' });
@@ -678,9 +914,11 @@ app.delete('/api/admin/licenses/:id', authMiddleware, (req, res) => {
         if (force) {
             db.forceDeleteLicense(id);
             db.logAccess('', 'LICENSE_FORCE_DELETE', ip, `id:${id} by ${req.admin.username}`);
+            db.logAdminAction(req.admin.username, 'FORCE_DELETE_LICENSE', `Permanently deleted license ID: ${id}`, ip);
         } else {
             db.softDeleteLicense(id);
             db.logAccess('', 'LICENSE_SOFT_DELETE', ip, `id:${id} by ${req.admin.username}`);
+            db.logAdminAction(req.admin.username, 'DELETE_LICENSE', `Moved license ID: ${id} to trash`, ip);
         }
 
         res.json({ status: 'ok' });
@@ -716,6 +954,7 @@ app.post('/api/admin/licenses/bulk', authMiddleware, (req, res) => {
             processed++;
         }
         db.logAccess('', `BULK_${action.toUpperCase()}`, ip, `${processed} licenses by ${req.admin.username}`);
+        db.logAdminAction(req.admin.username, `BULK_${action.toUpperCase()}`, `Processed ${processed} licenses.\n\nAffected License IDs: ${ids.join(', ')}`, ip);
         res.json({ status: 'ok', processed });
     } catch (e) {
         console.error('Bulk action error:', e.message);
@@ -747,22 +986,132 @@ app.put('/api/admin/devices/:id', authMiddleware, (req, res) => {
         const { action, name } = req.body;
         const ip = getClientIP(req);
 
+        // Fetch device record first so we can clear the right IP session
+        const dev = db.get ? db.get('SELECT * FROM devices WHERE id = ?', [id]) : null;
+
         if (action === 'block') {
             db.blockDevice(id);
+            if (dev) clearIPSessionsForTarget(dev.license_key);
             db.logAccess('', 'DEVICE_BLOCK', ip, `device_id:${id} by ${req.admin.username}`);
+            db.logAdminAction(req.admin.username, 'BLOCK_DEVICE', `Blocked device ID: ${id}`, ip);
         } else if (action === 'unblock') {
             db.unblockDevice(id);
+            if (dev) clearIPSessionsForTarget(dev.license_key);
             db.logAccess('', 'DEVICE_UNBLOCK', ip, `device_id:${id} by ${req.admin.username}`);
+            db.logAdminAction(req.admin.username, 'UNBLOCK_DEVICE', `Unblocked device ID: ${id}`, ip);
         } else if (action === 'rename') {
             db.renameDevice(id, name || '');
+            db.logAdminAction(req.admin.username, 'RENAME_DEVICE', `Renamed device ID: ${id} to ${name}`, ip);
         } else if (action === 'delete') {
             db.deleteDevice(id);
+            if (dev) clearIPSessionsForTarget(dev.license_key);
             db.logAccess('', 'DEVICE_DELETE', ip, `device_id:${id} by ${req.admin.username}`);
+            db.logAdminAction(req.admin.username, 'DELETE_DEVICE', `Deleted device ID: ${id}`, ip);
         }
 
         res.json({ status: 'ok' });
     } catch (e) {
         console.error('Device action error:', e.message);
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+app.delete('/api/admin/devices/:id', authMiddleware, (req, res) => {
+    try {
+        const id = parseInt(req.params.id);
+        const ip = getClientIP(req);
+        const dev = db.get ? db.get('SELECT * FROM devices WHERE id = ?', [id]) : null;
+        db.deleteDevice(id);
+        if (dev) clearIPSessionsForTarget(dev.license_key);
+        db.logAccess('', 'DEVICE_DELETE', ip, `device_id:${id} by ${req.admin.username}`);
+        db.logAdminAction(req.admin.username, 'DELETE_DEVICE', `Deleted device ID: ${id}`, ip);
+        res.json({ status: 'ok' });
+    } catch (e) {
+        console.error('Device delete error:', e.message);
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+// ============================================================
+// ADMIN — Device Token Management
+// ============================================================
+
+// List tokens for a license
+app.get('/api/admin/licenses/:id/tokens', authMiddleware, (req, res) => {
+    try {
+        const lic = db.getLicenseById(parseInt(req.params.id));
+        if (!lic) return res.status(404).json({ status: 'error', message: 'License not found' });
+        const tokens = db.getDeviceTokensByLicense(lic.license_key);
+        const serverUrl = db.getSetting('server_url') || `http://${getLocalIP()}:${PORT}`;
+        // Attach full repo URL + plugins URL per token
+        const withUrls = tokens.map(t => ({
+            ...t,
+            repo_url: `${serverUrl}/r/${lic.license_key}/${t.token}/repo.json`,
+            plugins_url: `${serverUrl}/r/${lic.license_key}/${t.token}/plugins.json`
+        }));
+        res.json({ status: 'ok', tokens: withUrls, license_key: lic.license_key });
+    } catch (e) {
+        console.error('List tokens error:', e.message);
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+// Create new device token for a license
+app.post('/api/admin/licenses/:id/tokens', authMiddleware, (req, res) => {
+    try {
+        const id = parseInt(req.params.id);
+        const lic = db.getLicenseById(id);
+        if (!lic) return res.status(404).json({ status: 'error', message: 'License not found' });
+
+        const label = cleanInput(req.body.label || '');
+        const currentCount = db.getDeviceTokenCount(lic.license_key);
+
+        if (lic.max_devices > 0 && currentCount >= lic.max_devices) {
+            return res.json({ status: 'error', message: `Sudah ${currentCount} token. Hapus dulu atau naikkan max_devices.` });
+        }
+
+        const token = db.createDeviceToken(lic.license_key, label || `Device ${currentCount + 1}`);
+        const serverUrl = db.getSetting('server_url') || `http://${getLocalIP()}:${PORT}`;
+        const ip = getClientIP(req);
+
+        db.logAdminAction(req.admin.username, 'CREATE_DEVICE_TOKEN', `Created token for license ${lic.license_key} label:${label}`, ip);
+
+        res.json({
+            status: 'ok',
+            token,
+            repo_url: `${serverUrl}/r/${lic.license_key}/${token}/repo.json`,
+            plugins_url: `${serverUrl}/r/${lic.license_key}/${token}/plugins.json`
+        });
+    } catch (e) {
+        console.error('Create token error:', e.message);
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+// Block/Unblock/Rename/Delete a device token
+app.put('/api/admin/device-tokens/:id', authMiddleware, (req, res) => {
+    try {
+        const id = parseInt(req.params.id);
+        const { action, label } = req.body;
+        const ip = getClientIP(req);
+
+        if (action === 'block') {
+            db.blockDeviceToken(id);
+            db.logAdminAction(req.admin.username, 'BLOCK_DEVICE_TOKEN', `Blocked token ID:${id}`, ip);
+        } else if (action === 'unblock') {
+            db.unblockDeviceToken(id);
+            db.logAdminAction(req.admin.username, 'UNBLOCK_DEVICE_TOKEN', `Unblocked token ID:${id}`, ip);
+        } else if (action === 'rename') {
+            db.renameDeviceToken(id, cleanInput(label || ''));
+            db.logAdminAction(req.admin.username, 'RENAME_DEVICE_TOKEN', `Renamed token ID:${id} to ${label}`, ip);
+        } else if (action === 'delete') {
+            db.deleteDeviceToken(id);
+            db.logAdminAction(req.admin.username, 'DELETE_DEVICE_TOKEN', `Deleted token ID:${id}`, ip);
+        }
+
+        res.json({ status: 'ok' });
+    } catch (e) {
+        console.error('Token action error:', e.message);
         res.status(500).json({ status: 'error', message: 'Server error' });
     }
 });
@@ -795,6 +1144,40 @@ app.get('/api/admin/playback-logs', authMiddleware, (req, res) => {
         res.json({ status: 'ok', ...result });
     } catch (e) {
         console.error('Playback logs error:', e.message);
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+app.get('/api/admin/export/licenses', authMiddleware, (req, res) => {
+    try {
+        const result = db.getLicensesPaginated(1, 10000, '', '', false);
+        const licenses = result.licenses;
+        const header = 'ID,License Key,Name,Max Devices,Status,Expires At,Created At,Note\n';
+        const rows = licenses.map(l =>
+            `${l.id},${l.license_key},"${l.name || ''}",${l.max_devices},${l.status},${l.expires_at},${l.created_at},"${(l.note || '').replace(/"/g, '""')}"`
+        ).join('\n');
+
+        db.logAdminAction(req.admin.username, 'EXPORT_LICENSES', `Exported ${licenses.length} licenses to CSV`, getClientIP(req));
+
+        res.header('Content-Type', 'text/csv');
+        res.attachment(`licenses-export-${new Date().toISOString().split('T')[0]}.csv`);
+        res.send(header + rows);
+    } catch (e) {
+        console.error('Export licenses error:', e.message);
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+app.get('/api/admin/admin-logs', authMiddleware, (req, res) => {
+    try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+        const search = cleanInput(req.query.search || '');
+
+        const result = db.getAdminLogsPaginated(page, limit, search);
+        res.json({ status: 'ok', ...result });
+    } catch (e) {
+        console.error('Admin logs error:', e.message);
         res.status(500).json({ status: 'error', message: 'Server error' });
     }
 });
@@ -942,18 +1325,24 @@ app.get('/api/admin/analytics/user/:key', authMiddleware, (req, res) => {
         if (!license) return res.status(404).json({ status: 'error', message: 'License not found' });
 
         const pluginUsage = db.all(
-            `SELECT plugin_name, action, COUNT(*) as count, MAX(used_at) as last_used
-             FROM plugin_usage
-             WHERE license_key = ? AND used_at > datetime('now', '-${days} days')
-             GROUP BY plugin_name, action
+            `SELECT pu.plugin_name, pu.action, pu.device_id, 
+                    COALESCE(d.device_name, '') as device_name,
+                    COUNT(*) as count, MAX(pu.used_at) as last_used
+             FROM plugin_usage pu
+             LEFT JOIN devices d ON pu.license_key = d.license_key AND pu.device_id = d.device_id
+             WHERE pu.license_key = ? AND pu.used_at > datetime('now', '-${days} days')
+             GROUP BY pu.plugin_name, pu.action, pu.device_id
              ORDER BY count DESC`, [key]
         );
 
         const playbackHistory = db.all(
-            `SELECT plugin_name, video_title, source_provider, played_at
-             FROM playback_logs
-             WHERE license_key = ? AND played_at > datetime('now', '-${days} days')
-             ORDER BY played_at DESC
+            `SELECT pl.plugin_name, pl.video_title, pl.source_provider, pl.played_at, 
+                    pl.device_id, pl.ip_address,
+                    COALESCE(d.device_name, '') as device_name
+             FROM playback_logs pl
+             LEFT JOIN devices d ON pl.license_key = d.license_key AND pl.device_id = d.device_id
+             WHERE pl.license_key = ? AND pl.played_at > datetime('now', '-${days} days')
+             ORDER BY pl.played_at DESC
              LIMIT 100`, [key]
         );
 
@@ -962,9 +1351,10 @@ app.get('/api/admin/analytics/user/:key', authMiddleware, (req, res) => {
         );
 
         const recentLogs = db.all(
-            `SELECT * FROM access_logs
-             WHERE license_key = ?
-             ORDER BY created_at DESC LIMIT 50`, [key]
+            `SELECT al.*, COALESCE(d.device_name, '') as device_name FROM access_logs al
+             LEFT JOIN devices d ON al.license_key = d.license_key AND al.device_id = d.device_id
+             WHERE al.license_key = ?
+             ORDER BY al.created_at DESC LIMIT 50`, [key]
         );
 
         res.json({
@@ -1074,6 +1464,8 @@ app.put('/api/admin/settings', authMiddleware, (req, res) => {
             }
         }
         db.logAccess('', 'SETTINGS_UPDATE', getClientIP(req), `by ${req.admin.username}`);
+        const settingsText = settings ? Object.keys(settings).map(k => `${k}: ${settings[k]}`).join('\n') : '';
+        db.logAdminAction(req.admin.username, 'UPDATE_SETTINGS', `Updated global system settings:\n\n${settingsText}`, getClientIP(req));
         res.json({ status: 'ok' });
     } catch (e) {
         res.status(500).json({ status: 'error', message: 'Server error' });
@@ -1102,6 +1494,7 @@ app.put('/api/admin/password', authMiddleware, (req, res) => {
         const hash = bcrypt.hashSync(new_password, 12);
         db.updateAdminPassword(admin.id, hash);
         db.logAccess('', 'PASSWORD_CHANGE', getClientIP(req), `admin: ${req.admin.username}`);
+        db.logAdminAction(req.admin.username, 'UPDATE_PASSWORD', `Changed superadmin password`, getClientIP(req));
 
         res.json({ status: 'ok', message: 'Password updated' });
     } catch (e) {
@@ -1110,12 +1503,75 @@ app.put('/api/admin/password', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// FALLBACK — SPA
+// ADMIN — Change Password (alias: /admin/change-password)
 // ============================================================
 
-app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+app.post('/api/admin/change-password', authMiddleware, (req, res) => {
+    try {
+        const { current_password, new_password } = req.body;
+        if (!current_password || !new_password)
+            return res.status(400).json({ status: 'error', message: 'Both passwords required' });
+        if (new_password.length < 6)
+            return res.status(400).json({ status: 'error', message: 'Password too short (min 6)' });
+        const admin = db.getAdminByUsername(req.admin.username);
+        if (!bcrypt.compareSync(current_password, admin.password_hash))
+            return res.status(401).json({ status: 'error', message: 'Current password incorrect' });
+        const hash = bcrypt.hashSync(new_password, 12);
+        db.updateAdminPassword(admin.id, hash);
+        db.logAccess('', 'PASSWORD_CHANGE', getClientIP(req), `admin: ${req.admin.username}`);
+        res.json({ status: 'ok', message: 'Password updated' });
+    } catch (e) {
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
 });
+
+// ============================================================
+// ADMIN — Failed Validations Feed
+// ============================================================
+
+app.get('/api/admin/failed-validations', authMiddleware, (req, res) => {
+    try {
+        const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+        const feed = db.getFailedValidations ? db.getFailedValidations(limit) : [];
+        res.json({ status: 'ok', logs: feed, total: feed.length });
+    } catch (e) {
+        console.error('Failed validations error:', e.message);
+        // Fallback: grab activity logs filtered by type
+        try {
+            const stmt = db.db.prepare(
+                `SELECT * FROM access_logs WHERE action LIKE '%FAIL%' OR action LIKE '%BLOCK%' OR action LIKE '%INVALID%'
+                 ORDER BY created_at DESC LIMIT ?`
+            );
+            const rows = stmt.getAsObject ? [] : db.db.exec(
+                `SELECT * FROM access_logs WHERE action LIKE '%FAIL%' OR action LIKE '%BLOCK%' OR action LIKE '%INVALID%'
+                 ORDER BY created_at DESC LIMIT 50`
+            );
+            const results = rows.length ? rows[0].values.map(r => ({
+                action: r[2], license_key: r[1], ip_address: r[3], detail: r[4], timestamp: r[5]
+            })) : [];
+            res.json({ status: 'ok', logs: results, total: results.length });
+        } catch {
+            res.json({ status: 'ok', logs: [], total: 0 });
+        }
+    }
+});
+
+// NOTE: Primary bulk license route is defined earlier at /api/admin/licenses/bulk.
+// This duplicate definition has been removed to prevent Express route conflicts.
+
+// ============================================================
+// ADMIN — Blocked IPs (alias path)
+// ============================================================
+
+app.get('/api/admin/blocked-ips', authMiddleware, (req, res) => {
+    try {
+        const blocked = db.getBlockedIPs ? db.getBlockedIPs() : [];
+        res.json({ status: 'ok', blocked_ips: blocked });
+    } catch (e) {
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
 
 // ============================================================
 // GRACEFUL SHUTDOWN
@@ -1129,6 +1585,86 @@ process.on('SIGINT', () => {
 process.on('SIGTERM', () => {
     console.log('\nShutting down gracefully...');
     process.exit(0);
+});
+
+// ============================================================
+// ADMIN — Repositories
+// ============================================================
+
+app.get('/api/admin/repos', authMiddleware, (req, res) => {
+    try {
+        const repos = db.getRepositories();
+        res.json({ status: 'ok', repos });
+    } catch (e) {
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+app.post('/api/admin/repos', authMiddleware, (req, res) => {
+    try {
+        const { name, url, count } = req.body;
+        if (!url) return res.status(400).json({ status: 'error', message: 'URL required' });
+
+        const result = db.addRepository(name || 'Unknown Plugin Repo', url, count || 0);
+        if (result.success) {
+            db.logAccess('', 'ADD_REPO', getClientIP(req), `${url} by ${req.admin.username}`);
+            res.json({ status: 'ok', message: 'Repository added successfully' });
+        } else {
+            res.status(400).json({ status: 'error', message: result.error });
+        }
+    } catch (e) {
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+app.delete('/api/admin/repos/:id', authMiddleware, (req, res) => {
+    try {
+        const id = req.params.id;
+        db.deleteRepository(id);
+        db.logAccess('', 'DELETE_REPO', getClientIP(req), `Repo ID ${id} by ${req.admin.username}`);
+        res.json({ status: 'ok', message: 'Repository deleted' });
+    } catch (e) {
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+app.post('/api/admin/repos/validate', authMiddleware, async (req, res) => {
+    try {
+        const { url } = req.body;
+        if (!url) return res.status(400).json({ status: 'error', message: 'URL required' });
+
+        // Node 18+ has native fetch
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+
+        const data = await response.json();
+
+        let plugins = [];
+        if (Array.isArray(data)) {
+            plugins = data;
+        } else if (data.plugins && Array.isArray(data.plugins)) {
+            plugins = data.plugins;
+        } else {
+            throw new Error('Invalid JSON structure: Expected array of plugins');
+        }
+
+        // Return first 50 for preview
+        res.json({
+            status: 'ok',
+            valid: true,
+            count: plugins.length,
+            plugins: plugins.slice(0, 50).map(p => ({
+                name: p.name || p.Name || 'Unknown',
+                package: p.internalName || p.package || 'unknown.package',
+                version: p.version || '0.0.0',
+                url: p.url || '',
+                icon: p.icon || ''
+            }))
+        });
+
+    } catch (e) {
+        res.status(400).json({ status: 'error', message: 'Validation failed: ' + e.message });
+    }
 });
 
 // ============================================================
@@ -1151,3 +1687,15 @@ db.initDatabase().then(() => {
     console.error('Failed to initialize database:', err);
     process.exit(1);
 });
+
+// ============================================================
+// FALLBACK — SPA (Must be last)
+// ============================================================
+
+app.get('*', (req, res) => {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+

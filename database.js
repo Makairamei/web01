@@ -110,10 +110,28 @@ async function initDatabase() {
         device_name TEXT DEFAULT '',
         ip_address TEXT DEFAULT '',
         is_blocked INTEGER DEFAULT 0,
+        first_seen_action TEXT DEFAULT 'UNKNOWN',
         first_seen DATETIME DEFAULT (datetime('now')),
         last_seen DATETIME DEFAULT (datetime('now')),
         UNIQUE(license_key, device_id)
     )`);
+    // Migration: add first_seen_action to existing tables
+    try { db.run(`ALTER TABLE devices ADD COLUMN first_seen_action TEXT DEFAULT 'UNKNOWN'`); } catch (_) { }
+
+    // Device tokens: each slot gets a unique URL token
+    // URL format: /r/{license_key}/{token}/repo.json
+    db.run(`CREATE TABLE IF NOT EXISTS device_tokens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        license_key TEXT NOT NULL,
+        token TEXT UNIQUE NOT NULL,
+        label TEXT DEFAULT '',
+        ip_address TEXT DEFAULT '',
+        is_blocked INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT (datetime('now')),
+        last_seen DATETIME DEFAULT NULL
+    )`);
+    try { db.run(`ALTER TABLE device_tokens ADD COLUMN ip_address TEXT DEFAULT ''`); } catch (_) { }
+    try { db.run(`ALTER TABLE device_tokens ADD COLUMN last_seen DATETIME DEFAULT NULL`); } catch (_) { }
 
     db.run(`CREATE TABLE IF NOT EXISTS plugin_usage (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -149,6 +167,23 @@ async function initDatabase() {
     // Migration: add device_id to access_logs if missing (for existing databases)
     try { db.run(`ALTER TABLE access_logs ADD COLUMN device_id TEXT DEFAULT ''`); } catch (_) { }
 
+    db.run(`CREATE TABLE IF NOT EXISTS admin_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        admin_username TEXT NOT NULL,
+        action TEXT NOT NULL,
+        details TEXT DEFAULT '',
+        ip_address TEXT DEFAULT '',
+        created_at DATETIME DEFAULT (datetime('now'))
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS repositories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        url TEXT UNIQUE NOT NULL,
+        plugin_count INTEGER DEFAULT 0,
+        last_checked DATETIME DEFAULT (datetime('now'))
+    )`);
+
     db.run(`CREATE TABLE IF NOT EXISTS failed_logins (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ip_address TEXT NOT NULL,
@@ -173,10 +208,13 @@ async function initDatabase() {
     db.run(`CREATE INDEX IF NOT EXISTS idx_licenses_status ON licenses(status)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_devices_key ON devices(license_key)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_devices_device ON devices(device_id)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_device_tokens_key ON device_tokens(license_key)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_device_tokens_token ON device_tokens(token)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_plugin_usage_key ON plugin_usage(license_key)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_playback_key ON playback_logs(license_key)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_access_logs_key ON access_logs(license_key)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_blocked_ips ON blocked_ips(ip_address)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_admin_logs_user ON admin_logs(admin_username)`);
 
     // --- DEFAULT ADMIN ---
     const adminCount = get('SELECT COUNT(*) as c FROM admins');
@@ -326,9 +364,15 @@ function getLicenseDetails(id) {
     const lic = getLicenseById(id);
     if (!lic) return null;
     const devices = all('SELECT * FROM devices WHERE license_key = ? ORDER BY last_seen DESC', [lic.license_key]);
-    const recentLogs = all('SELECT * FROM access_logs WHERE license_key = ? ORDER BY created_at DESC LIMIT 50', [lic.license_key]);
-    const pluginUsage = all('SELECT * FROM plugin_usage WHERE license_key = ? ORDER BY used_at DESC LIMIT 50', [lic.license_key]);
-    const playbackLogs = all('SELECT * FROM playback_logs WHERE license_key = ? ORDER BY played_at DESC LIMIT 50', [lic.license_key]);
+    const recentLogs = all(`SELECT al.*, d.device_name FROM access_logs al
+        LEFT JOIN devices d ON al.license_key = d.license_key AND al.device_id = d.device_id
+        WHERE al.license_key = ? ORDER BY al.created_at DESC LIMIT 50`, [lic.license_key]);
+    const pluginUsage = all(`SELECT pu.*, d.device_name FROM plugin_usage pu
+        LEFT JOIN devices d ON pu.license_key = d.license_key AND pu.device_id = d.device_id
+        WHERE pu.license_key = ? ORDER BY pu.used_at DESC LIMIT 50`, [lic.license_key]);
+    const playbackLogs = all(`SELECT pl.*, d.device_name FROM playback_logs pl
+        LEFT JOIN devices d ON pl.license_key = d.license_key AND pl.device_id = d.device_id
+        WHERE pl.license_key = ? ORDER BY pl.played_at DESC LIMIT 50`, [lic.license_key]);
     return { ...lic, devices, recentLogs, pluginUsage, playbackLogs };
 }
 
@@ -336,7 +380,7 @@ function getLicenseDetails(id) {
 // LICENSE VALIDATION
 // ============================================================
 
-function validateLicense(key, ip = '', deviceId = '', deviceName = '') {
+function validateLicense(key, ip = '', deviceId = '', deviceName = '', firstSeenAction = 'UNKNOWN') {
     // Check IP block
     const blocked = get('SELECT 1 as b FROM blocked_ips WHERE ip_address = ?', [ip]);
     if (blocked) return { valid: false, reason: 'ip_blocked' };
@@ -356,6 +400,7 @@ function validateLicense(key, ip = '', deviceId = '', deviceName = '') {
     }
 
     // Device handling
+    let isNewDevice = false;
     if (deviceId) {
         const existing = get('SELECT * FROM devices WHERE license_key = ? AND device_id = ?', [key, deviceId]);
         if (existing) {
@@ -363,16 +408,25 @@ function validateLicense(key, ip = '', deviceId = '', deviceName = '') {
             run("UPDATE devices SET last_seen = datetime('now'), ip_address = ? WHERE id = ?", [ip, existing.id]);
         } else {
             // Check device limit
-            const count = get('SELECT COUNT(*) as c FROM devices WHERE license_key = ?', [key]);
-            if (lic.max_devices > 0 && (count?.c || 0) >= lic.max_devices) {
+            const countRow = get('SELECT COUNT(*) as c FROM devices WHERE license_key = ?', [key]);
+            const currentCount = countRow?.c || 0;
+            if (lic.max_devices > 0 && currentCount >= lic.max_devices) {
                 return { valid: false, reason: 'max_devices', license: lic };
             }
-            run('INSERT INTO devices (license_key, device_id, device_name, ip_address) VALUES (?, ?, ?, ?)', [key, deviceId, deviceName, ip]);
+            const autoDeviceName = deviceName && deviceName.trim() ? deviceName.trim().substring(0, 200) : `Device ${currentCount + 1}`;
+            run('INSERT INTO devices (license_key, device_id, device_name, ip_address, first_seen_action) VALUES (?, ?, ?, ?, ?)',
+                [key, deviceId, autoDeviceName, ip, firstSeenAction || 'UNKNOWN']);
+            isNewDevice = true;
         }
     }
 
     const daysLeft = Math.ceil((expiry - now) / 86400000);
-    return { valid: true, license: lic, daysLeft };
+    return { valid: true, license: lic, daysLeft, isNewDevice };
+}
+
+// Get a specific device record without creating it
+function getDeviceByDeviceId(licenseKey, deviceId) {
+    return get('SELECT * FROM devices WHERE license_key = ? AND device_id = ?', [licenseKey, deviceId]);
 }
 
 // ============================================================
@@ -407,6 +461,82 @@ function deleteDevice(id) {
 function renameDevice(id, name) {
     run('UPDATE devices SET device_name = ? WHERE id = ?', [name, id]);
 }
+
+// Replace a temporary IP-based device with the real Android device ID.
+// repo.json creates a temp device (ip_xxx) so it shows immediately in admin panel,
+// then check-ip provides the real device_id (permanent Android ID) and we swap it.
+function replaceTemporaryDevice(licenseKey, tempDeviceId, realDeviceId, ip) {
+    if (!tempDeviceId || !realDeviceId || tempDeviceId === realDeviceId) return;
+
+    // Check if real device already exists for this license
+    const realExisting = get('SELECT * FROM devices WHERE license_key = ? AND device_id = ?', [licenseKey, realDeviceId]);
+    if (realExisting) {
+        // Real device already registered — just delete the temp one
+        run('DELETE FROM devices WHERE license_key = ? AND device_id = ?', [licenseKey, tempDeviceId]);
+        // Update real device's last_seen and IP
+        run("UPDATE devices SET last_seen = datetime('now'), ip_address = ? WHERE id = ?", [ip, realExisting.id]);
+        return;
+    }
+
+    // Real device doesn't exist yet — upgrade the temp device to the real one
+    const tempExisting = get('SELECT * FROM devices WHERE license_key = ? AND device_id = ?', [licenseKey, tempDeviceId]);
+    if (tempExisting) {
+        run("UPDATE devices SET device_id = ?, device_name = ?, last_seen = datetime('now'), ip_address = ? WHERE id = ?",
+            [realDeviceId, `Android (${realDeviceId.substring(0, 6)})`, ip, tempExisting.id]);
+    }
+}
+
+// ============================================================
+// DEVICE TOKEN MANAGEMENT (URL-based per-device access)
+// ============================================================
+
+function generateDeviceToken() {
+    return crypto.randomBytes(12).toString('hex'); // 24-char hex token
+}
+
+function createDeviceToken(licenseKey, label = '') {
+    const token = generateDeviceToken();
+    run('INSERT INTO device_tokens (license_key, token, label) VALUES (?, ?, ?)', [licenseKey, token, label || `Device ${Date.now()}`]);
+    return token;
+}
+
+function getDeviceTokensByLicense(licenseKey) {
+    return all('SELECT * FROM device_tokens WHERE license_key = ? ORDER BY created_at DESC', [licenseKey]);
+}
+
+function getDeviceToken(token) {
+    return get('SELECT * FROM device_tokens WHERE token = ?', [token]);
+}
+
+function validateDeviceToken(licenseKey, token, ip = '') {
+    const dt = get('SELECT * FROM device_tokens WHERE token = ? AND license_key = ?', [token, licenseKey]);
+    if (!dt) return { valid: false, reason: 'invalid_token' };
+    if (dt.is_blocked) return { valid: false, reason: 'device_blocked' };
+    // Update last seen + IP
+    run("UPDATE device_tokens SET last_seen = datetime('now'), ip_address = ? WHERE id = ?", [ip, dt.id]);
+    return { valid: true, token: dt };
+}
+
+function blockDeviceToken(id) {
+    run('UPDATE device_tokens SET is_blocked = 1 WHERE id = ?', [id]);
+}
+
+function unblockDeviceToken(id) {
+    run('UPDATE device_tokens SET is_blocked = 0 WHERE id = ?', [id]);
+}
+
+function deleteDeviceToken(id) {
+    run('DELETE FROM device_tokens WHERE id = ?', [id]);
+}
+
+function renameDeviceToken(id, label) {
+    run('UPDATE device_tokens SET label = ? WHERE id = ?', [label, id]);
+}
+
+function getDeviceTokenCount(licenseKey) {
+    return get('SELECT COUNT(*) as c FROM device_tokens WHERE license_key = ?', [licenseKey])?.c || 0;
+}
+
 
 // ============================================================
 // PLUGIN USAGE TRACKING
@@ -482,6 +612,28 @@ function getAccessLogsPaginated(page = 1, limit = 50, search = '', action = '') 
         LEFT JOIN devices d ON al.license_key = d.license_key AND al.device_id = d.device_id
         LEFT JOIN licenses l ON al.license_key = l.license_key
         ${where} ORDER BY al.created_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+    return { logs: rows, total: total?.c || 0, page, limit };
+}
+
+// ============================================================
+// ADMIN LOGS
+// ============================================================
+
+function logAdminAction(username, action, details = '', ip = '') {
+    run('INSERT INTO admin_logs (admin_username, action, details, ip_address) VALUES (?, ?, ?, ?)', [username || 'system', action, details, ip]);
+}
+
+function getAdminLogsPaginated(page = 1, limit = 50, search = '') {
+    const offset = (page - 1) * limit;
+    let whereClauses = [];
+    let params = [];
+    if (search) {
+        whereClauses.push('(admin_username LIKE ? OR action LIKE ? OR details LIKE ? OR ip_address LIKE ?)');
+        params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+    }
+    const where = whereClauses.length ? `WHERE ${whereClauses.join(' AND ')}` : '';
+    const total = get(`SELECT COUNT(*) as c FROM admin_logs ${where}`, params);
+    const rows = all(`SELECT * FROM admin_logs ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
     return { logs: rows, total: total?.c || 0, page, limit };
 }
 
@@ -582,6 +734,31 @@ function getDashboardStats() {
 }
 
 // ============================================================
+// REPOSITORY MANAGEMENT
+// ============================================================
+
+function getRepositories() {
+    return all("SELECT * FROM repositories ORDER BY id DESC");
+}
+
+function addRepository(name, url, count) {
+    try {
+        runNoSave("INSERT INTO repositories (name, url, plugin_count, last_checked) VALUES (?, ?, ?, datetime('now'))", [name, url, count]);
+        saveDB();
+        return { success: true };
+    } catch (e) {
+        if (e.message.includes('UNIQUE constraint failed')) {
+            return { success: false, error: 'Repository URL already exists' };
+        }
+        throw e;
+    }
+}
+
+function deleteRepository(id) {
+    run("DELETE FROM repositories WHERE id = ?", [id]);
+}
+
+// ============================================================
 // EXPORTS
 // ============================================================
 
@@ -598,14 +775,22 @@ module.exports = {
     restoreLicense, forceDeleteLicense, getLicenseDetails,
     // Validation
     validateLicense,
+    // Device lookup (read-only, no create)
+    getDeviceByDeviceId,
     // Devices
-    getDevicesPaginated, blockDevice, unblockDevice, deleteDevice, renameDevice,
+    getDevicesPaginated, blockDevice, unblockDevice, deleteDevice, renameDevice, replaceTemporaryDevice,
+    // Device Tokens (URL-based per-device access)
+    createDeviceToken, getDeviceTokensByLicense, getDeviceToken,
+    validateDeviceToken, blockDeviceToken, unblockDeviceToken,
+    deleteDeviceToken, renameDeviceToken, getDeviceTokenCount,
     // Plugin tracking
     trackPluginUsage, getPluginUsagePaginated,
     // Playback tracking
     trackPlayback, getPlaybackLogsPaginated,
     // Access logs
     logAccess, getAccessLogsPaginated,
+    // Admin logs
+    logAdminAction, getAdminLogsPaginated,
     // Security
     recordFailedLogin, clearFailedLogins, getFailedLogins,
     blockIP, unblockIP, getBlockedIPs, isIPBlocked,
