@@ -381,10 +381,7 @@ function getLicenseDetails(id) {
 // ============================================================
 
 function validateLicense(key, ip = '', deviceId = '', deviceName = '', firstSeenAction = 'UNKNOWN') {
-    // Check IP block
-    const blocked = get('SELECT 1 as b FROM blocked_ips WHERE ip_address = ?', [ip]);
-    if (blocked) return { valid: false, reason: 'ip_blocked' };
-
+    // Only device blocking applies now, IP tracking is only for logging
     const lic = getLicenseByKey(key);
     if (!lic) return { valid: false, reason: 'not_found' };
     if (lic.status === 'revoked') return { valid: false, reason: 'revoked' };

@@ -55,17 +55,6 @@ app.use((req, res, next) => {
 });
 // === END DEBUG LOGGER ===
 
-app.use((req, res, next) => {
-    // Normalize URL path: replace double slashes with single slash, ignore query params
-    const qIndex = req.url.indexOf('?');
-    const path = qIndex === -1 ? req.url : req.url.substring(0, qIndex);
-
-    if (path.includes('//')) {
-        const newPath = path.replace(/\/{2,}/g, '/');
-        req.url = newPath + (qIndex === -1 ? '' : req.url.substring(qIndex));
-    }
-    next();
-});
 app.use(express.static(path.join(__dirname, 'public'), {
     setHeaders: (res, pathStr) => {
         if (pathStr.endsWith('.html')) {
@@ -209,11 +198,7 @@ app.post('/api/validate', rateLimit(60000, 30), (req, res) => {
         const deviceName = cleanInput(req.body.device_name);
         const ip = getClientIP(req);
 
-        // STRICT COOKIE TRACKING: The cookie ID generated at `repo.json` is the absolute truth.
-        const cookieId = getOrCreateDeviceCookie(req, res);
-        if (cookieId) {
-            deviceId = cookieId;
-        } else if (!deviceId || deviceId.toLowerCase() === 'unknown' || deviceId.toLowerCase() === 'null') {
+        if (!deviceId || deviceId.toLowerCase() === 'unknown' || deviceId.toLowerCase() === 'null') {
             return res.json({ status: 'error', message: 'Device ID required. Please enter Repo URL first.' });
         }
 
@@ -229,15 +214,11 @@ app.post('/api/validate', rateLimit(60000, 30), (req, res) => {
                 revoked: 'License has been revoked',
                 expired: 'License has expired',
                 max_devices: 'Maximum device limit reached',
-                device_blocked: 'This device has been blocked',
-                ip_blocked: 'Your IP has been blocked'
+                device_blocked: 'This device has been blocked'
             };
             db.logAccess(key, 'VALIDATE_FAIL', ip, `reason:${result.reason} device:${deviceId}`, deviceId);
             return res.json({ status: 'error', message: messages[result.reason] || 'Access denied', reason: result.reason });
         }
-
-        // Create IP session so plugins can discover their key later
-        createIPSession(ip, key, deviceId);
 
         const action = result.isNewDevice ? 'DEVICE_REGISTERED' : 'VALIDATE_OK';
         db.logAccess(key, action, ip, `device:${deviceId} name:${deviceName}`, deviceId);
@@ -265,11 +246,7 @@ app.post('/api/heartbeat', rateLimit(60000, 60), (req, res) => {
         let deviceId = cleanInput(req.body.device_id);
         const ip = getClientIP(req);
 
-        // STRICT COOKIE TRACKING
-        const cookieId = getOrCreateDeviceCookie(req, res);
-        if (cookieId) {
-            deviceId = cookieId;
-        } else if (!deviceId || deviceId.toLowerCase() === 'unknown' || deviceId.toLowerCase() === 'null') {
+        if (!deviceId || deviceId.toLowerCase() === 'unknown' || deviceId.toLowerCase() === 'null') {
             return res.json({ status: 'error', message: 'Device ID required' });
         }
 
@@ -278,7 +255,6 @@ app.post('/api/heartbeat', rateLimit(60000, 60), (req, res) => {
         // Full license re-validation on every heartbeat
         const result = db.validateLicense(key, ip, deviceId, '', 'HEARTBEAT');
         if (!result.valid) {
-            ipSessions.delete(ip);
             return res.json({ status: 'error', reason: result.reason });
         }
 
@@ -318,12 +294,6 @@ app.get('/api/check-ip', rateLimit(60000, 120), (req, res) => {
             return res.json({ status: 'error', message: 'Lisensi tidak ditemukan di plugin.' });
         }
 
-        // Check IP blocked
-        if (db.isIPBlocked(ip)) {
-            db.logAccess(key, 'IP_BLOCKED', ip, `device:${deviceId}`, deviceId);
-            return res.json({ status: 'error', message: 'IP blocked' });
-        }
-
         // Full license validation
         const result = db.validateLicense(key, ip, deviceId, 'CloudStream Sandbox', 'CHECK_IP');
         if (!result.valid) {
@@ -332,8 +302,7 @@ app.get('/api/check-ip', rateLimit(60000, 120), (req, res) => {
                 revoked: 'Lisensi telah dicabut oleh admin',
                 expired: 'Lisensi telah kadaluarsa. Silakan perpanjang.',
                 max_devices: 'Batas perangkat tercapai untuk lisensi ini',
-                device_blocked: 'Perangkat ini telah diblokir',
-                ip_blocked: 'IP anda diblokir'
+                device_blocked: 'Perangkat ini telah diblokir'
             };
             db.logAccess(key, 'CHECK_IP_FAIL', ip, `reason:${result.reason} plugin:${pluginName} action:${action}`, deviceId);
             return res.json({ status: 'error', message: messages[result.reason] || 'Access denied', reason: result.reason });
@@ -411,27 +380,23 @@ app.post('/api/verify_activity', rateLimit(60000, 120), (req, res) => {
     try {
         const key = cleanInput(req.body.key);
         const deviceId = cleanInput(req.body.device_id);
-        const deviceModel = cleanInput(req.body.device_model || '');
-        const pluginName = safeDecodePlugin(req.body.plugin_name || '');
+        const deviceModel = cleanInput(req.body.device_model); // New field added: Hardware Model
+        const pluginName = safeDecodePlugin(req.body.plugin_name);
         const action = cleanInput(req.body.action || 'OPEN').toUpperCase();
         const data = cleanInput(req.body.data || '');
         const ip = getClientIP(req);
 
-        // Swap temporary browser/cookie device from repo.json with actual permanent Android ID
-        const cookieId = req.cookies && req.cookies.cs_device_id;
-        if (cookieId && cookieId !== deviceId && key) {
-            db.replaceTemporaryDevice(key, cookieId, deviceId, ip);
+        if (!deviceId || deviceId.toLowerCase() === 'unknown' || deviceId.toLowerCase() === 'null') {
+            return res.json({ status: 'error', message: 'Device ID tidak valid.' });
         }
 
-        if (!key || !deviceId || deviceId.toLowerCase() === 'unknown' || deviceId.toLowerCase() === 'null') {
-            return res.json({ status: 'error', message: 'License Key dan Device ID valid diperlukan.' });
+        if (!key) {
+            db.logAccess('', 'VERIFY_FAIL', ip, `device:${deviceId} plugin:${pluginName} reason:NO_KEY`, deviceId);
+            return res.json({ status: 'error', message: 'Lisensi tidak ditemukan di plugin.' });
         }
 
-        // Use deviceModel as deviceName if provided
-        const deviceName = deviceModel ? deviceModel : `Android (${deviceId.substring(0, 6)})`;
-
-        // Full validation (auto-registers device if under limit and not blocked)
-        const result = db.validateLicense(key, ip, deviceId, deviceName, action);
+        // 2. Main Validation
+        const result = db.validateLicense(key, ip, deviceId, deviceModel || 'Android Device', action);
 
         if (!result.valid) {
             const msgs = {
@@ -572,26 +537,10 @@ app.get('/r/:key/repo.json', rateLimit(60000, 60), (req, res) => {
         const serverUrl = db.getSetting('server_url') || `http://${getLocalIP()}:${PORT}`;
         const ip = getClientIP(req);
 
-        // STRICT COOKIE TRACKING: Tag the device exactly when they paste the URL
-        const deviceId = getOrCreateDeviceCookie(req, res);
-        const deviceName = `Browser / CloudStream (${deviceId.substring(3, 8)})`;
+        // We DO NOT validate devices on repo load anymore, only plugins validate.
+        // This stops the 404/Not Found cookie conflict.
 
-        const result = db.validateLicense(key, ip, deviceId, deviceName, 'REPO');
-
-        if (!result.valid) {
-            const messages = {
-                not_found: 'Invalid license',
-                revoked: 'License revoked',
-                expired: 'License expired',
-                max_devices: 'Device limit reached for this license',
-                device_blocked: 'This device has been blocked',
-                ip_blocked: 'Access denied'
-            };
-            db.logAccess(key, 'REPO_DENY', ip, `reason:${result.reason}`, deviceId);
-            return res.json({ status: 'error', message: messages[result.reason] || 'Access denied' });
-        }
-
-        db.logAccess(key, 'REPO_ACCESS', ip, `device:${deviceId}`, deviceId);
+        db.logAccess(key, 'REPO_ACCESS', ip, `Browser / CloudStream`, '');
 
         res.json({
             name: "Premium Extensions",
