@@ -319,12 +319,14 @@ export default function SettingsPage() {
                         </>
                     )}
 
-                    <div className="pt-1">
-                        <button type="submit" disabled={loading} className="btn-primary">
-                            <Save className="w-3.5 h-3.5" />
-                            {loading ? 'Saving…' : 'Save Changes'}
-                        </button>
-                    </div>
+                    {tab !== 'repos' && (
+                        <div className="pt-1">
+                            <button type="submit" disabled={loading} className="btn-primary">
+                                <Save className="w-3.5 h-3.5" />
+                                {loading ? 'Saving…' : 'Save Changes'}
+                            </button>
+                        </div>
+                    )}
                 </form>
             </div>
 

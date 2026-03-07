@@ -89,7 +89,7 @@ export default function Sidebar() {
                 onMouseEnter={handleMouseEnter}
                 onMouseLeave={handleMouseLeave}
                 className={`
-                    fixed inset-y-0 left-0 z-50 bg-white/95 dark:bg-[#080e1c]/95 backdrop-blur-xl
+                    fixed lg:absolute inset-y-0 left-0 z-50 bg-white/95 dark:bg-[#080e1c]/95 backdrop-blur-xl
                     border-r border-slate-200/70 dark:border-slate-800/70
                     transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]
                     flex flex-col

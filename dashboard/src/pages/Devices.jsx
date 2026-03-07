@@ -141,7 +141,9 @@ export default function Devices() {
                                     <td>
                                         {d.is_blocked
                                             ? <span className="badge badge-blocked">Blocked</span>
-                                            : <span className="badge badge-active">Active</span>
+                                            : d.is_online
+                                                ? <span className="badge badge-active">Online</span>
+                                                : <span className="badge badge-expired">Offline</span>
                                         }
                                     </td>
                                     <td className="hide-mobile">
@@ -219,7 +221,7 @@ export default function Devices() {
                                 {[
                                     { icon: Globe, label: 'IP Address', val: drawer.ip_address || '—' },
                                     { icon: Clock, label: 'Last Seen', val: timeAgo(drawer.last_seen) },
-                                    { icon: Activity, label: 'Status', val: drawer.is_blocked ? 'Blocked' : 'Active' },
+                                    { icon: Activity, label: 'Status', val: drawer.is_blocked ? 'Blocked' : (drawer.is_online ? 'Online' : 'Offline') },
                                     { icon: Clock, label: 'First Seen', val: formatWIB(drawer.first_seen) },
                                 ].map(r => (
                                     <div key={r.label} className="flex items-center gap-2 p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/50">

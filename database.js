@@ -308,10 +308,16 @@ function getLicensesPaginated(page = 1, limit = 20, search = '', status = '', tr
     const total = get(`SELECT COUNT(*) as c FROM licenses ${where}`, params);
     const rows = all(`SELECT * FROM licenses ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
 
-    // Attach device count
+    const now = new Date();
+    // Attach device count and check expiration dynamically
     rows.forEach(r => {
         const dc = get('SELECT COUNT(*) as c FROM devices WHERE license_key = ?', [r.license_key]);
         r.device_count = dc?.c || 0;
+
+        if (r.status === 'active' && new Date(r.expires_at) < now) {
+            r.status = 'expired';
+            run("UPDATE licenses SET status = 'expired' WHERE id = ?", [r.id]);
+        }
     });
 
     return { licenses: rows, total: total?.c || 0, page, limit };
@@ -363,16 +369,23 @@ function forceDeleteLicense(id) {
 function getLicenseDetails(id) {
     const lic = getLicenseById(id);
     if (!lic) return null;
-    const devices = all('SELECT * FROM devices WHERE license_key = ? ORDER BY last_seen DESC', [lic.license_key]);
+
+    if (lic.status === 'active' && new Date(lic.expires_at) < new Date()) {
+        lic.status = 'expired';
+        run("UPDATE licenses SET status = 'expired' WHERE id = ?", [lic.id]);
+    }
+
+    const devices = all(`SELECT *, CASE WHEN last_seen > datetime('now', '-30 minutes') THEN 1 ELSE 0 END as is_online
+        FROM devices WHERE license_key = ? ORDER BY last_seen DESC`, [lic.license_key]);
     const recentLogs = all(`SELECT al.*, d.device_name FROM access_logs al
         LEFT JOIN devices d ON al.license_key = d.license_key AND al.device_id = d.device_id
-        WHERE al.license_key = ? ORDER BY al.created_at DESC LIMIT 50`, [lic.license_key]);
+        WHERE al.license_key = ? ORDER BY al.created_at DESC LIMIT 100`, [lic.license_key]);
     const pluginUsage = all(`SELECT pu.*, d.device_name FROM plugin_usage pu
         LEFT JOIN devices d ON pu.license_key = d.license_key AND pu.device_id = d.device_id
-        WHERE pu.license_key = ? ORDER BY pu.used_at DESC LIMIT 50`, [lic.license_key]);
+        WHERE pu.license_key = ? ORDER BY pu.used_at DESC LIMIT 200`, [lic.license_key]);
     const playbackLogs = all(`SELECT pl.*, d.device_name FROM playback_logs pl
         LEFT JOIN devices d ON pl.license_key = d.license_key AND pl.device_id = d.device_id
-        WHERE pl.license_key = ? ORDER BY pl.played_at DESC LIMIT 50`, [lic.license_key]);
+        WHERE pl.license_key = ? ORDER BY pl.played_at DESC LIMIT 200`, [lic.license_key]);
     return { ...lic, devices, recentLogs, pluginUsage, playbackLogs };
 }
 
@@ -439,7 +452,13 @@ function getDevicesPaginated(page = 1, limit = 20, search = '') {
         params = [`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`];
     }
     const total = get(`SELECT COUNT(*) as c FROM devices d ${where}`, params);
-    const rows = all(`SELECT d.*, l.name as license_name, l.status as license_status FROM devices d LEFT JOIN licenses l ON d.license_key = l.license_key ${where} ORDER BY d.last_seen DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+    const rows = all(`SELECT d.*, l.name as license_name, 
+        CASE 
+            WHEN l.status = 'active' AND l.expires_at <= datetime('now', 'localtime') THEN 'expired' 
+            ELSE l.status 
+        END as license_status,
+        CASE WHEN d.last_seen > datetime('now', '-30 minutes') THEN 1 ELSE 0 END as is_online
+        FROM devices d LEFT JOIN licenses l ON d.license_key = l.license_key ${where} ORDER BY d.last_seen DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
     return { devices: rows, total: total?.c || 0, page, limit };
 }
 
@@ -699,11 +718,14 @@ function updateAdminPassword(id, newHash) {
 
 function getDashboardStats() {
     const totalLicenses = get("SELECT COUNT(*) as c FROM licenses WHERE deleted_at IS NULL")?.c || 0;
-    const activeLicenses = get("SELECT COUNT(*) as c FROM licenses WHERE status = 'active' AND deleted_at IS NULL")?.c || 0;
-    const expiredLicenses = get("SELECT COUNT(*) as c FROM licenses WHERE status = 'expired' AND deleted_at IS NULL")?.c || 0;
+
+    // Evaluate active vs expired dynamically based on expires_at instead of just the status column
+    const activeLicenses = get("SELECT COUNT(*) as c FROM licenses WHERE status = 'active' AND expires_at > datetime('now', 'localtime') AND deleted_at IS NULL")?.c || 0;
+    const expiredLicenses = get("SELECT COUNT(*) as c FROM licenses WHERE (status = 'expired' OR (status = 'active' AND expires_at <= datetime('now', 'localtime'))) AND deleted_at IS NULL")?.c || 0;
     const revokedLicenses = get("SELECT COUNT(*) as c FROM licenses WHERE status = 'revoked' AND deleted_at IS NULL")?.c || 0;
+
     const totalDevices = get("SELECT COUNT(*) as c FROM devices")?.c || 0;
-    const activeDevices = get("SELECT COUNT(*) as c FROM devices WHERE last_seen > datetime('now', '-1 hour')")?.c || 0;
+    const activeDevices = get("SELECT COUNT(*) as c FROM devices WHERE last_seen > datetime('now', '-30 minutes')")?.c || 0;
     const totalPluginEvents = get("SELECT COUNT(*) as c FROM plugin_usage")?.c || 0;
     const totalPlaybacks = get("SELECT COUNT(*) as c FROM playback_logs")?.c || 0;
     const todayPluginEvents = get("SELECT COUNT(*) as c FROM plugin_usage WHERE used_at > datetime('now', '-1 day')")?.c || 0;
@@ -721,12 +743,71 @@ function getDashboardStats() {
     // Blocked IPs count
     const blockedIPs = get("SELECT COUNT(*) as c FROM blocked_ips")?.c || 0;
 
+    // Blocked Devices count
+    const blockedDevices = get("SELECT COUNT(*) as c FROM devices WHERE is_blocked = 1")?.c || 0;
+
     return {
         totalLicenses, activeLicenses, expiredLicenses, revokedLicenses,
-        totalDevices, activeDevices,
+        totalDevices, activeDevices, blockedDevices,
         totalPluginEvents, totalPlaybacks,
         todayPluginEvents, todayPlaybacks,
         topPlugins, topSources, recentActivity, blockedIPs
+    };
+}
+
+// ============================================================
+// SALES ANALYTICS
+function getSalesAnalytics(range = '14') {
+    let dateFormat = "'%Y-%m-%d'"; // Default daily grouping
+
+    // Build WHERE clause for a specific column based on time range
+    const buildDateFilter = (dateCol) => {
+        if (range === 'all') {
+            return '1=1'; // No time limit
+        } else if (range === 'year') {
+            return `datetime(${dateCol}, 'localtime') >= datetime('now', 'start of year', 'localtime')`;
+        } else {
+            const days = parseInt(range) || 14;
+            return `${dateCol} > datetime('now', '-${days} days')`;
+        }
+    };
+
+    // Use monthly grouping for large ranges
+    if (range === 'all' || range === 'year') {
+        dateFormat = "'%Y-%m'";
+    }
+
+    // Helper to build queries
+    const buildQuery = (table, dateCol, extraWhere = '') => {
+        return `SELECT strftime(${dateFormat}, ${dateCol}) as day, COUNT(*) as count 
+                FROM ${table} 
+                WHERE ${buildDateFilter(dateCol)} ${extraWhere}
+                GROUP BY day ORDER BY day`;
+    };
+
+    // 1. License Creation (Sales) per time unit
+    const salesTrend = all(buildQuery('licenses', 'created_at', 'AND deleted_at IS NULL'));
+
+    // 2. Device Registrations (Activations) per time unit
+    const activationsTrend = all(buildQuery('devices', 'first_seen'));
+
+    // 3. Expirations per time unit (only licenses that have ALREADY expired, not future ones)
+    const expirationsTrend = all(buildQuery('licenses', 'expires_at', "AND expires_at <= datetime('now') AND deleted_at IS NULL"));
+
+    // 4. Blocks/Revocations per time unit (use created_at since licenses table has no updated_at)
+    const blocksTrend = all(buildQuery('licenses', 'created_at', "AND status = 'revoked' AND deleted_at IS NULL"));
+
+    // 5. License Health (Status distribution) dynamically calculated
+    const active = get("SELECT COUNT(*) as c FROM licenses WHERE status = 'active' AND expires_at > datetime('now', 'localtime') AND deleted_at IS NULL")?.c || 0;
+    const expired = get("SELECT COUNT(*) as c FROM licenses WHERE (status = 'expired' OR (status = 'active' AND expires_at <= datetime('now', 'localtime'))) AND deleted_at IS NULL")?.c || 0;
+    const revoked = get("SELECT COUNT(*) as c FROM licenses WHERE status = 'revoked' AND deleted_at IS NULL")?.c || 0;
+
+    return {
+        salesTrend,
+        activationsTrend,
+        expirationsTrend,
+        blocksTrend,
+        licenseHealth: { active, expired, revoked }
     };
 }
 
@@ -753,6 +834,28 @@ function addRepository(name, url, count) {
 
 function deleteRepository(id) {
     run("DELETE FROM repositories WHERE id = ?", [id]);
+}
+
+// ============================================================
+// LOG CLEANUP (90-day retention)
+// ============================================================
+
+function cleanupOldLogs() {
+    const tables = [
+        { name: 'plugin_usage', col: 'used_at' },
+        { name: 'playback_logs', col: 'played_at' },
+        { name: 'access_logs', col: 'created_at' }
+    ];
+    let totalDeleted = 0;
+    for (const t of tables) {
+        const before = get(`SELECT COUNT(*) as c FROM ${t.name} WHERE ${t.col} < datetime('now', '-90 days')`)?.c || 0;
+        if (before > 0) {
+            run(`DELETE FROM ${t.name} WHERE ${t.col} < datetime('now', '-90 days')`);
+            totalDeleted += before;
+            console.log(`  [CLEANUP] Deleted ${before} old records from ${t.name}`);
+        }
+    }
+    return totalDeleted;
 }
 
 // ============================================================
@@ -794,5 +897,9 @@ module.exports = {
     // Admin
     getAdminByUsername, updateAdminPassword,
     // Dashboard
-    getDashboardStats
+    getDashboardStats, getSalesAnalytics,
+    // Repositories
+    getRepositories, addRepository, deleteRepository,
+    // Log cleanup
+    cleanupOldLogs
 };

@@ -347,27 +347,57 @@ app.get('/api/check-ip', rateLimit(60000, 120), (req, res) => {
 });
 
 // ============================================================
-// PUBLIC API — Auto-discover license key by IP session
+// PUBLIC API — Auto-discover license key via Cookie (Replaces IP)
 // ============================================================
 
-app.get('/api/key-by-ip', rateLimit(60000, 30), (req, res) => {
+app.get('/api/discover', rateLimit(60000, 30), (req, res) => {
     try {
         const ip = getClientIP(req);
         if (db.isIPBlocked(ip)) {
             return res.json({ status: 'error', message: 'IP blocked' });
         }
-        const session = getIPSession(ip);
-        if (!session) {
-            return res.json({ status: 'error', message: 'No active session' });
+
+        // Strategy 1: Look up by device_id from query parameter (Android plugin sends this)
+        const deviceId = cleanInput(req.query.device_id || '');
+        if (deviceId && deviceId.toLowerCase() !== 'unknown') {
+            const devRecord = db.get("SELECT license_key FROM devices WHERE device_id = ? ORDER BY last_seen DESC LIMIT 1", [deviceId]);
+            if (devRecord && devRecord.license_key) {
+                const lic = db.getLicenseByKey(devRecord.license_key);
+                if (lic && lic.status === 'active') {
+                    console.log(`[DISCOVER] Found key for device ${deviceId}: ${devRecord.license_key}`);
+                    return res.json({ status: 'active', key: devRecord.license_key, expires_at: lic.expires_at });
+                }
+            }
         }
-        const lic = db.getLicenseByKey(session.key);
-        if (!lic || lic.status !== 'active') {
-            ipSessions.delete(ip);
-            return res.json({ status: 'error', message: 'License inactive' });
+
+        // Strategy 2: Cookie-based session lookup
+        const csDeviceId = req.cookies && req.cookies.cs_device_id;
+        if (csDeviceId) {
+            const log = db.get("SELECT license_key FROM access_logs WHERE device_id = ? AND license_key != '' ORDER BY id DESC LIMIT 1", [csDeviceId]);
+            if (log && log.license_key) {
+                const lic = db.getLicenseByKey(log.license_key);
+                if (lic && lic.status === 'active') {
+                    return res.json({ status: 'active', key: log.license_key, expires_at: lic.expires_at });
+                }
+            }
         }
-        res.json({ status: 'active', key: session.key, expires_at: lic.expires_at });
+
+        // Strategy 3: IP-based bridge (OkHttp does not send WebView cookies)
+        // If the user setup the repository in the last 15 minutes from this IP, hand over the key.
+        if (ip) {
+            const recentLog = db.get("SELECT license_key FROM access_logs WHERE ip_address = ? AND license_key != '' AND created_at >= datetime('now', '-15 minutes') ORDER BY id DESC LIMIT 1", [ip]);
+            if (recentLog && recentLog.license_key) {
+                const lic = db.getLicenseByKey(recentLog.license_key);
+                if (lic && lic.status === 'active') {
+                    console.log(`[DISCOVER] Bridged key via IP ${ip}: ${recentLog.license_key}`);
+                    return res.json({ status: 'active', key: recentLog.license_key, expires_at: lic.expires_at });
+                }
+            }
+        }
+
+        return res.json({ status: 'error', message: 'No active session for this device' });
     } catch (e) {
-        console.error('Key-by-IP error:', e.message);
+        console.error('Discover API error:', e.message);
         res.status(500).json({ status: 'error', message: 'Server error' });
     }
 });
@@ -378,9 +408,9 @@ app.get('/api/key-by-ip', rateLimit(60000, 30), (req, res) => {
 
 app.post('/api/verify_activity', rateLimit(60000, 120), (req, res) => {
     try {
-        const key = cleanInput(req.body.key);
+        let key = cleanInput(req.body.key);
         const deviceId = cleanInput(req.body.device_id);
-        const deviceModel = cleanInput(req.body.device_model); // New field added: Hardware Model
+        const deviceModel = cleanInput(req.body.device_model); // Hardware Model
         const pluginName = safeDecodePlugin(req.body.plugin_name);
         const action = cleanInput(req.body.action || 'OPEN').toUpperCase();
         const data = cleanInput(req.body.data || '');
@@ -388,6 +418,53 @@ app.post('/api/verify_activity', rateLimit(60000, 120), (req, res) => {
 
         if (!deviceId || deviceId.toLowerCase() === 'unknown' || deviceId.toLowerCase() === 'null') {
             return res.json({ status: 'error', message: 'Device ID tidak valid.' });
+        }
+
+        // AUTO-CORRECTION: If the provided key is invalid/revoked/missing, try to recover the correct key.
+        const licCheck = db.getLicenseByKey(key);
+        if (!key || !licCheck || licCheck.status !== 'active') {
+            let recovered = false;
+
+            // Strategy 1: Look up this device_id in the devices table to find its valid license
+            if (!recovered && deviceId) {
+                const devRecord = db.get("SELECT license_key FROM devices WHERE device_id = ? ORDER BY last_seen DESC LIMIT 1", [deviceId]);
+                if (devRecord && devRecord.license_key) {
+                    const validLic = db.getLicenseByKey(devRecord.license_key);
+                    if (validLic && validLic.status === 'active') {
+                        key = devRecord.license_key;
+                        recovered = true;
+                        console.log(`[AUTO-FIX] Recovered key for device ${deviceId}: ${key}`);
+                    }
+                }
+            }
+
+            // Strategy 2: Cookie-based session lookup (fallback for browser-like clients)
+            if (!recovered) {
+                const csDeviceId = req.cookies && req.cookies.cs_device_id;
+                if (csDeviceId) {
+                    const log = db.get("SELECT license_key FROM access_logs WHERE device_id = ? AND license_key != '' ORDER BY id DESC LIMIT 1", [csDeviceId]);
+                    if (log && log.license_key) {
+                        const validLic = db.getLicenseByKey(log.license_key);
+                        if (validLic && validLic.status === 'active') {
+                            key = log.license_key;
+                            recovered = true;
+                        }
+                    }
+                }
+            }
+
+            // Strategy 3: IP-based bridge (fallback for OkHttp clients without cookies that have the wrong key)
+            if (!recovered && ip) {
+                const recentLog = db.get("SELECT license_key FROM access_logs WHERE ip_address = ? AND license_key != '' AND created_at >= datetime('now', '-15 minutes') ORDER BY id DESC LIMIT 1", [ip]);
+                if (recentLog && recentLog.license_key) {
+                    const validLic = db.getLicenseByKey(recentLog.license_key);
+                    if (validLic && validLic.status === 'active') {
+                        key = recentLog.license_key;
+                        recovered = true;
+                        console.log(`[AUTO-FIX] Bridged key via IP ${ip}: ${key}`);
+                    }
+                }
+            }
         }
 
         if (!key) {
@@ -540,7 +617,8 @@ app.get('/r/:key/repo.json', rateLimit(60000, 60), (req, res) => {
         // We DO NOT validate devices on repo load anymore, only plugins validate.
         // This stops the 404/Not Found cookie conflict.
 
-        db.logAccess(key, 'REPO_ACCESS', ip, `Browser / CloudStream`, '');
+        const deviceId = getOrCreateDeviceCookie(req, res);
+        db.logAccess(key, 'REPO_ACCESS', ip, `Browser / CloudStream`, deviceId);
 
         res.json({
             name: "Premium Extensions",
@@ -594,7 +672,8 @@ app.get('/r/:key/:token/repo.json', rateLimit(60000, 60), (req, res) => {
             return res.json({ status: 'error', message: msgs[tokenResult.reason] || 'Akses ditolak' });
         }
         const serverUrl = db.getSetting('server_url') || `http://${getLocalIP()}:${PORT}`;
-        db.logAccess(key, 'TOKEN_REPO_ACCESS', ip, `token:${token} label:${tokenResult.token.label}`);
+        const deviceId = getOrCreateDeviceCookie(req, res);
+        db.logAccess(key, 'TOKEN_REPO_ACCESS', ip, `token:${token} label:${tokenResult.token.label}`, deviceId);
 
         res.json({
             name: "Premium Extensions",
@@ -638,16 +717,18 @@ app.get('/r/:key/:token/plugins.json', rateLimit(60000, 60), async (req, res) =>
             return res.json([]);
         }
 
-        db.logAccess(key, 'TOKEN_PLUGIN_LIST_ACCESS', ip, `token:${token} label:${tokenResult.token.label}`);
+        const deviceId = getOrCreateDeviceCookie(req, res);
+        db.logAccess(key, 'TOKEN_PLUGIN_LIST_ACCESS', ip, `token:${token} label:${tokenResult.token.label}`, deviceId);
 
         // Fetch from upstream repositories
         let upstreamUrls = [];
         try {
-            const setting = db.getSetting('upstream_urls');
-            if (setting) upstreamUrls = JSON.parse(setting);
+            const repos = db.getRepositories();
+            if (repos && repos.length > 0) {
+                upstreamUrls = repos.map(r => ({ url: r.url, active: true }));
+            }
         } catch (e) {
-            const legacy = db.getSetting('upstream_plugins_url');
-            if (legacy) upstreamUrls = [{ url: legacy, active: true }];
+            console.error('Failed to get repositories', e);
         }
 
         if (!Array.isArray(upstreamUrls) || upstreamUrls.length === 0) {
@@ -703,12 +784,12 @@ app.get('/r/:key/plugins.json', rateLimit(60000, 60), async (req, res) => {
         // Fetch from upstream repositories
         let upstreamUrls = [];
         try {
-            const setting = db.getSetting('upstream_urls');
-            if (setting) upstreamUrls = JSON.parse(setting);
+            const repos = db.getRepositories();
+            if (repos && repos.length > 0) {
+                upstreamUrls = repos.map(r => ({ url: r.url, active: true }));
+            }
         } catch (e) {
-            // Fallback to legacy setting if new one doesn't exist
-            const legacy = db.getSetting('upstream_plugins_url');
-            if (legacy) upstreamUrls = [{ url: legacy, active: true }];
+            console.error('Failed to get repositories', e);
         }
 
         if (!Array.isArray(upstreamUrls) || upstreamUrls.length === 0) {
@@ -1260,6 +1341,23 @@ app.get('/api/admin/activity-feed', authMiddleware, (req, res) => {
     }
 });
 
+// Sales & License Analytics
+app.get('/api/admin/analytics/sales', authMiddleware, (req, res) => {
+    try {
+        const days = req.query.days || '14';
+        const data = db.getSalesAnalytics(days);
+
+        res.json({
+            status: 'ok',
+            ...data,
+            period: days
+        });
+    } catch (e) {
+        console.error('Analytics sales error:', e.message);
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
 // Plugin breakdown statistics
 app.get('/api/admin/analytics/plugins', authMiddleware, (req, res) => {
     try {
@@ -1342,9 +1440,9 @@ app.get('/api/admin/analytics/user/:key', authMiddleware, (req, res) => {
         if (!license) return res.status(404).json({ status: 'error', message: 'License not found' });
 
         const pluginUsage = db.all(
-            `SELECT pu.plugin_name, pu.action, pu.device_id, 
-                    COALESCE(d.device_name, '') as device_name,
-                    COUNT(*) as count, MAX(pu.used_at) as last_used
+            `SELECT pu.plugin_name, pu.action, pu.device_id,
+            COALESCE(d.device_name, '') as device_name,
+            COUNT(*) as count, MAX(pu.used_at) as last_used
              FROM plugin_usage pu
              LEFT JOIN devices d ON pu.license_key = d.license_key AND pu.device_id = d.device_id
              WHERE pu.license_key = ? AND pu.used_at > datetime('now', '-${days} days')
@@ -1353,9 +1451,9 @@ app.get('/api/admin/analytics/user/:key', authMiddleware, (req, res) => {
         );
 
         const playbackHistory = db.all(
-            `SELECT pl.plugin_name, pl.video_title, pl.source_provider, pl.played_at, 
-                    pl.device_id, pl.ip_address,
-                    COALESCE(d.device_name, '') as device_name
+            `SELECT pl.plugin_name, pl.video_title, pl.source_provider, pl.played_at,
+            pl.device_id, pl.ip_address,
+            COALESCE(d.device_name, '') as device_name
              FROM playback_logs pl
              LEFT JOIN devices d ON pl.license_key = d.license_key AND pl.device_id = d.device_id
              WHERE pl.license_key = ? AND pl.played_at > datetime('now', '-${days} days')
@@ -1364,14 +1462,14 @@ app.get('/api/admin/analytics/user/:key', authMiddleware, (req, res) => {
         );
 
         const devices = db.all(
-            `SELECT * FROM devices WHERE license_key = ?`, [key]
+            `SELECT * FROM devices WHERE license_key = ? `, [key]
         );
 
         const recentLogs = db.all(
             `SELECT al.*, COALESCE(d.device_name, '') as device_name FROM access_logs al
              LEFT JOIN devices d ON al.license_key = d.license_key AND al.device_id = d.device_id
              WHERE al.license_key = ?
-             ORDER BY al.created_at DESC LIMIT 50`, [key]
+            ORDER BY al.created_at DESC LIMIT 50`, [key]
         );
 
         res.json({
@@ -1393,17 +1491,6 @@ app.get('/api/admin/analytics/user/:key', authMiddleware, (req, res) => {
 app.get('/api/admin/active-sessions', authMiddleware, (req, res) => {
     try {
         const sessions = [];
-        for (const [ip, session] of ipSessions) {
-            const lic = db.getLicenseByKey(session.key);
-            sessions.push({
-                ip,
-                license_key: session.key,
-                license_name: lic?.name || '',
-                status: lic?.status || 'unknown',
-                expires_at: new Date(session.expiresAt).toISOString(),
-                ttl_minutes: Math.round((session.expiresAt - Date.now()) / 60000)
-            });
-        }
         res.json({ status: 'ok', sessions, count: sessions.length });
     } catch (e) {
         console.error('Active sessions error:', e.message);
@@ -1482,7 +1569,7 @@ app.put('/api/admin/settings', authMiddleware, (req, res) => {
         }
         db.logAccess('', 'SETTINGS_UPDATE', getClientIP(req), `by ${req.admin.username}`);
         const settingsText = settings ? Object.keys(settings).map(k => `${k}: ${settings[k]}`).join('\n') : '';
-        db.logAdminAction(req.admin.username, 'UPDATE_SETTINGS', `Updated global system settings:\n\n${settingsText}`, getClientIP(req));
+        db.logAdminAction(req.admin.username, 'UPDATE_SETTINGS', `Updated global system settings: \n\n${settingsText}`, getClientIP(req));
         res.json({ status: 'ok' });
     } catch (e) {
         res.status(500).json({ status: 'error', message: 'Server error' });
@@ -1557,7 +1644,7 @@ app.get('/api/admin/failed-validations', authMiddleware, (req, res) => {
         try {
             const stmt = db.db.prepare(
                 `SELECT * FROM access_logs WHERE action LIKE '%FAIL%' OR action LIKE '%BLOCK%' OR action LIKE '%INVALID%'
-                 ORDER BY created_at DESC LIMIT ?`
+                 ORDER BY created_at DESC LIMIT ? `
             );
             const rows = stmt.getAsObject ? [] : db.db.exec(
                 `SELECT * FROM access_logs WHERE action LIKE '%FAIL%' OR action LIKE '%BLOCK%' OR action LIKE '%INVALID%'
@@ -1695,11 +1782,27 @@ db.initDatabase().then(() => {
         console.log('  ╔══════════════════════════════════════════╗');
         console.log('  ║   CloudStream Premium License Server     ║');
         console.log('  ╠══════════════════════════════════════════╣');
-        console.log(`  ║  Local:    http://localhost:${PORT}          ║`);
+        console.log(`  ║  Local: http://localhost:${PORT}          ║`);
         console.log(`  ║  Network:  http://${lanIP}:${PORT}    ║`);
         console.log('  ╚══════════════════════════════════════════╝');
         console.log('');
     });
+
+    // ── Log Cleanup: delete records older than 90 days ──
+    // Run once 30 seconds after startup, then every 24 hours
+    setTimeout(() => {
+        try {
+            const deleted = db.cleanupOldLogs();
+            if (deleted > 0) console.log(`  [CLEANUP] Startup cleanup removed ${deleted} old log entries`);
+        } catch (e) { console.error('Startup cleanup error:', e.message); }
+    }, 30000);
+
+    setInterval(() => {
+        try {
+            const deleted = db.cleanupOldLogs();
+            if (deleted > 0) console.log(`  [CLEANUP] Daily cleanup removed ${deleted} old log entries`);
+        } catch (e) { console.error('Daily cleanup error:', e.message); }
+    }, 24 * 60 * 60 * 1000);
 }).catch(err => {
     console.error('Failed to initialize database:', err);
     process.exit(1);

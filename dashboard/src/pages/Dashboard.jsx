@@ -1,32 +1,22 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { get, post, formatNumber, truncKey, timeAgo, copyText, cleanPluginName } from '../lib/api';
+import { get, post, formatNumber, truncKey, timeAgo, copyText, cleanPluginName, formatWIB } from '../lib/api';
 import {
     KeyRound, Smartphone, ShieldCheck, Activity, Play, AlertTriangle,
-    TrendingUp, TrendingDown, RefreshCw, CheckCircle, Lock, Server,
-    Copy, Zap, Globe, Ban, Eye
+    TrendingUp, TrendingDown, RefreshCw, Copy, Ban, Wifi, WifiOff, Monitor, Clock
 } from 'lucide-react';
 import {
-    LineChart, Line, BarChart, Bar, AreaChart, Area,
+    BarChart, Bar, PieChart, Pie, Cell,
     XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
 } from 'recharts';
 
 // ── Sub-components ────────────────────────────────────────────────
-function KpiCard({ icon: Icon, label, value, sub, gradient, trend, onClick }) {
+function KpiCard({ icon: Icon, label, value, sub, gradient, accent }) {
     return (
-        <div
-            onClick={onClick}
-            className={`${gradient} rounded-2xl p-5 border transition-all duration-200 hover:shadow-lg hover:-translate-y-0.5 cursor-default fade-in`}
-        >
+        <div className={`${gradient} rounded-2xl p-5 border transition-all duration-200 hover:shadow-lg hover:-translate-y-0.5 cursor-default fade-in`}>
             <div className="flex items-start justify-between mb-3">
                 <div className="p-2 rounded-xl bg-white/60 dark:bg-slate-900/50">
-                    <Icon className="w-4 h-4 text-slate-700 dark:text-slate-300" />
+                    <Icon className={`w-4 h-4 ${accent || 'text-slate-700 dark:text-slate-300'}`} />
                 </div>
-                {trend !== undefined && (
-                    <div className={`flex items-center gap-1 text-[11px] font-semibold ${trend > 0 ? 'text-emerald-600' : 'text-red-500'}`}>
-                        {trend > 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-                        {Math.abs(trend)}%
-                    </div>
-                )}
             </div>
             <div className="text-2xl font-bold text-slate-900 dark:text-white">{formatNumber(value) ?? '—'}</div>
             <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">{label}</div>
@@ -35,109 +25,191 @@ function KpiCard({ icon: Icon, label, value, sub, gradient, trend, onClick }) {
     );
 }
 
-function MiniChart({ data, dataKey, color, type = 'area', height = 110 }) {
+const CustomTooltip = ({ active, payload, label }) => {
+    if (active && payload && payload.length) {
+        return (
+            <div className="bg-white/90 dark:bg-[#0f172a]/95 backdrop-blur-xl border border-slate-200/60 dark:border-slate-800/80 p-3.5 rounded-2xl shadow-xl min-w-[140px]">
+                <p className="text-[12px] font-bold text-slate-500 dark:text-slate-400 mb-2.5 uppercase tracking-wider">{label}</p>
+                <div className="space-y-2">
+                    {payload.map((entry, index) => (
+                        <div key={index} className="flex items-center justify-between gap-4">
+                            <div className="flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: entry.color, boxShadow: `0 0 8px ${entry.color}60` }} />
+                                <span className="text-[13px] font-medium text-slate-700 dark:text-slate-200 capitalize">{entry.name}</span>
+                            </div>
+                            <span className="text-[13px] font-bold text-slate-900 dark:text-white tabular-nums">
+                                {formatNumber(entry.value)}
+                            </span>
+                        </div>
+                    ))}
+                </div>
+            </div>
+        );
+    }
+    return null;
+};
+
+function SalesChart({ data, height = 280 }) {
     if (!data?.length) return (
         <div className="flex items-center justify-center" style={{ height }}>
-            <span className="text-[12px] text-slate-300 dark:text-slate-600">No data yet</span>
+            <span className="text-[13px] text-slate-400 dark:text-slate-500 font-medium">No data yet</span>
         </div>
-    );
-    const gradId = `grad-${color.replace('#', '')}`;
-    if (type === 'bar') return (
-        <ResponsiveContainer width="100%" height={height}>
-            <BarChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" strokeOpacity={0.5} vertical={false} />
-                <XAxis dataKey="label" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
-                <YAxis hide />
-                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 10, border: '1px solid #e2e8f0' }} cursor={{ fill: 'rgba(99,102,241,0.06)' }} />
-                <Bar dataKey={dataKey} fill={color} radius={[4, 4, 0, 0]} />
-            </BarChart>
-        </ResponsiveContainer>
     );
     return (
         <ResponsiveContainer width="100%" height={height}>
-            <AreaChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
+            <BarChart data={data} margin={{ top: 10, right: 10, bottom: 0, left: -20 }} barGap={2} barCategoryGap="25%">
                 <defs>
-                    <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor={color} stopOpacity={0.18} />
-                        <stop offset="100%" stopColor={color} stopOpacity={0} />
+                    <linearGradient id="gradSales" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#818cf8" />
+                        <stop offset="100%" stopColor="#6366f1" />
+                    </linearGradient>
+                    <linearGradient id="gradExpirations" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#fbbf24" />
+                        <stop offset="100%" stopColor="#f59e0b" />
+                    </linearGradient>
+                    <linearGradient id="gradBlocks" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#f87171" />
+                        <stop offset="100%" stopColor="#ef4444" />
                     </linearGradient>
                 </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" strokeOpacity={0.4} vertical={false} />
-                <XAxis dataKey="label" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
-                <YAxis hide />
-                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 10, border: '1px solid #e2e8f0' }} />
-                <Area type="monotone" dataKey={dataKey} stroke={color} strokeWidth={2} fill={`url(#${gradId})`} dot={false} />
-            </AreaChart>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="currentColor" className="text-slate-200 dark:text-slate-800/50" />
+                <XAxis dataKey="label" tick={{ fontSize: 10.5, fill: '#94a3b8', fontWeight: 500 }} axisLine={false} tickLine={false} dy={8} />
+                <YAxis tick={{ fontSize: 10.5, fill: '#94a3b8', fontWeight: 500 }} axisLine={false} tickLine={false} dx={-8} allowDecimals={false} />
+                <Tooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(148,163,184,0.08)', radius: 6 }} />
+                <Bar dataKey="sales" name="New Licenses" fill="url(#gradSales)" radius={[4, 4, 0, 0]} maxBarSize={28} />
+                <Bar dataKey="expirations" name="Expired" fill="url(#gradExpirations)" radius={[4, 4, 0, 0]} maxBarSize={28} />
+                <Bar dataKey="blocks" name="Blocked" fill="url(#gradBlocks)" radius={[4, 4, 0, 0]} maxBarSize={28} />
+            </BarChart>
         </ResponsiveContainer>
     );
 }
 
-function StatusDot({ ok }) {
+function LicenseStatusChart({ data, height = 280 }) {
+    if (!data?.length) return (
+        <div className="flex items-center justify-center" style={{ height }}>
+            <span className="text-[13px] text-slate-400 dark:text-slate-500 font-medium">No license data yet</span>
+        </div>
+    );
     return (
-        <span className={`inline-block w-2 h-2 rounded-full shrink-0 ${ok ? 'bg-emerald-500 pulse-dot' : 'bg-red-500'}`} />
+        <ResponsiveContainer width="100%" height={height}>
+            <PieChart>
+                <Pie
+                    data={data}
+                    innerRadius={80}
+                    outerRadius={110}
+                    paddingAngle={3}
+                    dataKey="value"
+                    stroke="none"
+                >
+                    {data.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={entry.color} />
+                    ))}
+                </Pie>
+                <Tooltip content={<CustomTooltip />} />
+            </PieChart>
+        </ResponsiveContainer>
     );
 }
 
 // ── Main Dashboard ────────────────────────────────────────────────
+const RANGE_OPTIONS = [
+    { value: '7', label: 'Last 7 Days' },
+    { value: '30', label: 'Last 30 Days' },
+    { value: 'year', label: 'This Year' },
+    { value: 'all', label: 'All Time' },
+];
+
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function formatChartLabel(raw, range) {
+    if (!raw) return '';
+    // Monthly format: "2026-03" → "Mar 2026"
+    if (range === 'year' || range === 'all') {
+        const [y, m] = raw.split('-');
+        return `${MONTH_NAMES[parseInt(m, 10) - 1]} ${y}`;
+    }
+    // Daily format: "2026-03-07" → "07 Mar"
+    const parts = raw.split('-');
+    if (parts.length === 3) {
+        return `${parts[2]} ${MONTH_NAMES[parseInt(parts[1], 10) - 1]}`;
+    }
+    return raw;
+}
+
 export default function Dashboard() {
-    const [genModal, setGenModal] = useState(false);
     const [stats, setStats] = useState(null);
     const [feed, setFeed] = useState([]);
-    const [health, setHealth] = useState(null);
     const [analytics, setAnalytics] = useState(null);
+    const [salesData, setSalesData] = useState(null);
+    const [salesRange, setSalesRange] = useState('30');
     const [loading, setLoading] = useState(true);
     const [autoRefresh, setAutoRefresh] = useState(true);
     const [lastUpdated, setLastUpdated] = useState(null);
-    const [genForm, setGenForm] = useState({ duration_days: 30, name: '', max_devices: 2, count: 1, note: '' });
-    const [genLoading, setGenLoading] = useState(false);
-    const [genResult, setGenResult] = useState(null);
+
+    const fetchSales = useCallback(async (range) => {
+        try {
+            const sales = await get(`/admin/analytics/sales?days=${range}`);
+            setSalesData(sales);
+        } catch { }
+    }, []);
 
     const fetchAll = useCallback(async () => {
         try {
-            const [s, f, h, a] = await Promise.all([
+            const [s, f, a] = await Promise.all([
                 get('/admin/dashboard'),
                 get('/admin/activity-feed?minutes=1440&limit=25'),
-                get('/health').catch(() => null),
                 get('/admin/analytics/plugins?days=7').catch(() => null),
             ]);
             setStats(s);
             setFeed(f.feed || []);
-            setHealth(h);
             setAnalytics(a);
             setLastUpdated(new Date());
         } catch { } finally { setLoading(false); }
     }, []);
 
-    useEffect(() => { fetchAll(); }, [fetchAll]);
+    useEffect(() => { fetchAll(); fetchSales(salesRange); }, [fetchAll, fetchSales, salesRange]);
     useEffect(() => {
         if (!autoRefresh) return;
-        const id = setInterval(fetchAll, 30000);
+        const id = setInterval(() => { fetchAll(); fetchSales(salesRange); }, 30000);
         return () => clearInterval(id);
-    }, [autoRefresh, fetchAll]);
+    }, [autoRefresh, fetchAll, fetchSales, salesRange]);
 
-    const chartData = useMemo(() => {
-        if (!analytics?.dailyTrends) return [];
+    // Build license activity chart data (licenses vs expirations vs blocks)
+    const salesChartData = useMemo(() => {
+        if (!salesData?.salesTrend) return [];
         const days = {};
-        analytics.dailyTrends.forEach(r => {
-            if (!days[r.day]) days[r.day] = { day: r.day, validations: 0, plays: 0 };
-            // Simple heuristic: if action contains 'PLAY' or originates from playback_logs (which might not be in dailyTrends if it only queries plugin_usage?)
-            // Wait, database.js trace: dailyTrends queries PLUGIN_USAGE. It does NOT include playback_logs.
-            // But plugin_usage has 'action'.
-            if (r.action && (r.action.toUpperCase().includes('PLAY') || r.action.toUpperCase().includes('STREAM'))) {
-                days[r.day].plays += r.count;
-            } else {
-                days[r.day].validations += r.count;
-            }
-        });
-        // We also need to merge in playback trends if they existed, but dailyTrends only queries plugin_usage.
-        // For now, let's just use what we have.
-        return Object.values(days).sort((a, b) => a.day.localeCompare(b.day)).map(d => ({
-            label: d.day.slice(5),
-            validations: d.validations,
-            plays: d.plays,
-        }));
-    }, [analytics]);
 
+        const addData = (arr, key) => {
+            (arr || []).forEach(r => {
+                if (!days[r.day]) days[r.day] = { day: r.day, sales: 0, expirations: 0, blocks: 0 };
+                days[r.day][key] += r.count;
+            });
+        };
+
+        addData(salesData.salesTrend, 'sales');
+        addData(salesData.expirationsTrend, 'expirations');
+        addData(salesData.blocksTrend, 'blocks');
+
+        return Object.values(days).sort((a, b) => a.day.localeCompare(b.day)).map(d => ({
+            label: formatChartLabel(d.day, salesRange),
+            sales: d.sales,
+            expirations: d.expirations,
+            blocks: d.blocks
+        }));
+    }, [salesData, salesRange]);
+
+    // Build license health pie chart data
+    const licenseHealthData = useMemo(() => {
+        if (!salesData?.licenseHealth) return [];
+        const { active, expired, revoked } = salesData.licenseHealth;
+        return [
+            { name: 'Active', value: active, color: '#10b981' },
+            { name: 'Expired', value: expired, color: '#f59e0b' },
+            { name: 'Blocked', value: revoked, color: '#ef4444' }
+        ].filter(d => d.value > 0);
+    }, [salesData]);
+
+    // Top plugins list
     const topPlugins = useMemo(() => {
         if (!analytics?.byPlugin) return [];
         const map = {};
@@ -146,32 +218,22 @@ export default function Dashboard() {
             .sort((a, b) => b.count - a.count).slice(0, 8);
     }, [analytics]);
 
+    // Top content (most watched)
+    const topContent = useMemo(() => {
+        if (!analytics?.topContent) return [];
+        return analytics.topContent.slice(0, 6);
+    }, [analytics]);
+
+    // Alerts
     const alerts = useMemo(() => {
         const r = [];
         if (!stats) return r;
         if ((stats.expiring_soon || 0) > 0)
             r.push({ title: 'Licenses expiring soon', detail: `${stats.expiring_soon} licenses expire within 3 days`, severity: 'medium' });
-        if ((stats.totalPlaybacks || 0) > 500)
-            r.push({ title: 'High validation volume', detail: `${stats.totalPlaybacks} validations today`, severity: 'medium' });
         if ((stats.blockedIPs || 0) > 0)
             r.push({ title: 'Blocked IPs detected', detail: `${stats.blockedIPs} IP(s) currently blocked`, severity: 'high' });
         return r;
     }, [stats]);
-
-    const handleGenerate = async (e) => {
-        e.preventDefault();
-        setGenLoading(true);
-        setGenResult(null);
-        try {
-            const res = await post('/admin/licenses', genForm);
-            setGenResult(res.key || res.keys || 'Created!');
-            fetchAll();
-            if (genForm.count <= 1) {
-                setTimeout(() => { setGenModal(false); setGenResult(null); setGenForm({ duration_days: 30, name: '', max_devices: 2, count: 1, note: '' }); }, 2000);
-            }
-        } catch (e) { setGenResult('Error: ' + (e.message || 'Failed')); }
-        finally { setGenLoading(false); }
-    };
 
     const eventTypeColor = (type) => {
         if (!type) return 'badge-info';
@@ -185,11 +247,11 @@ export default function Dashboard() {
 
     if (loading) return (
         <div className="space-y-5">
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 stagger">
-                {[...Array(6)].map((_, i) => <div key={i} className="skeleton h-28 rounded-2xl fade-in" />)}
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4 stagger">
+                {[...Array(5)].map((_, i) => <div key={i} className="skeleton h-28 rounded-2xl fade-in" />)}
             </div>
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                {[...Array(3)].map((_, i) => <div key={i} className="skeleton h-44 rounded-2xl" />)}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {[...Array(2)].map((_, i) => <div key={i} className="skeleton h-52 rounded-2xl" />)}
             </div>
         </div>
     );
@@ -220,62 +282,98 @@ export default function Dashboard() {
                                 <span className="text-[13px] font-semibold">{a.title}</span>
                                 {a.detail && <span className="text-[12px] opacity-75 ml-2">{a.detail}</span>}
                             </div>
-                            <span className="badge text-[9px] shrink-0">{a.severity.toUpperCase()}</span>
                         </div>
                     ))}
                 </div>
             )}
 
-            {/* KPI Row */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3.5 stagger">
-                <KpiCard icon={KeyRound} label="Total Licenses" value={stats?.totalLicenses} sub={`${stats?.activeLicenses || 0} active`} gradient="kpi-gradient-blue" trend={3} />
-                <KpiCard icon={Activity} label="Active Licenses" value={stats?.activeLicenses} sub="Currently valid" gradient="kpi-gradient-green" trend={2} />
-                <KpiCard icon={Smartphone} label="Active Devices" value={stats?.totalDevices} sub="Registered" gradient="kpi-gradient-cyan" />
-                <KpiCard icon={ShieldCheck} label="Validations Today" value={stats?.todayPluginEvents} sub="API calls" gradient="kpi-gradient-purple" />
-                <KpiCard icon={Play} label="Playbacks Today" value={stats?.todayPlaybacks} sub="Streams" gradient="kpi-gradient-amber" />
-                <KpiCard icon={Ban} label="Blocked Licenses" value={stats?.revokedLicenses || stats?.suspendedLicenses || 0} sub="Suspended / revoked" gradient="kpi-gradient-rose" />
+            {/* KPI Row — 5 cards */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3.5 stagger">
+                <KpiCard icon={KeyRound} label="Total Licenses" value={stats?.totalLicenses} sub={`${stats?.activeLicenses || 0} active · ${stats?.expiredLicenses || 0} expired`} gradient="kpi-gradient-blue" accent="text-blue-600" />
+                <KpiCard icon={Wifi} label="Online Devices" value={stats?.activeDevices} sub={`${stats?.totalDevices || 0} registered`} gradient="kpi-gradient-green" accent="text-emerald-600" />
+                <KpiCard icon={Activity} label="Plugins Today" value={stats?.todayPluginEvents} sub="Plugin events" gradient="kpi-gradient-purple" accent="text-indigo-600" />
+                <KpiCard icon={Play} label="Playbacks Today" value={stats?.todayPlaybacks} sub="Video streams" gradient="kpi-gradient-amber" accent="text-amber-600" />
+                <KpiCard icon={Ban} label="Blocked" value={(stats?.revokedLicenses || 0) + (stats?.blockedIPs || 0) + (stats?.blockedDevices || 0)} sub={`${stats?.revokedLicenses || 0} licenses · ${stats?.blockedDevices || 0} devices · ${stats?.blockedIPs || 0} IPs`} gradient="kpi-gradient-rose" accent="text-red-500" />
             </div>
 
-            {/* Charts Row */}
+            {/* Charts Row — 2 columns */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                <div className="glass-card p-5">
-                    <h3 className="text-[13px] font-semibold text-slate-700 dark:text-slate-300 mb-3">Validation Trend</h3>
-                    <MiniChart data={chartData} dataKey="validations" color="#6366f1" />
+                <div className="glass-card p-5 lg:col-span-2">
+                    <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-[13px] font-semibold text-slate-700 dark:text-slate-300">License Activity Trend</h3>
+                        <select
+                            value={salesRange}
+                            onChange={e => setSalesRange(e.target.value)}
+                            className="text-[11px] font-medium px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 cursor-pointer hover:border-blue-400 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-400/30"
+                        >
+                            {RANGE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        </select>
+                    </div>
+                    <SalesChart data={salesChartData} />
+                    <div className="flex items-center justify-center gap-6 mt-3 flex-wrap">
+                        <div className="flex items-center gap-1.5">
+                            <span className="w-2.5 h-2.5 rounded-sm" style={{ background: 'linear-gradient(to bottom, #818cf8, #6366f1)' }} />
+                            <span className="text-[10.5px] font-medium text-slate-500">New Licenses</span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                            <span className="w-2.5 h-2.5 rounded-sm" style={{ background: 'linear-gradient(to bottom, #fbbf24, #f59e0b)' }} />
+                            <span className="text-[10.5px] font-medium text-slate-500">Expired</span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                            <span className="w-2.5 h-2.5 rounded-sm" style={{ background: 'linear-gradient(to bottom, #f87171, #ef4444)' }} />
+                            <span className="text-[10.5px] font-medium text-slate-500">Blocked</span>
+                        </div>
+                    </div>
                 </div>
-                <div className="glass-card p-5">
-                    <h3 className="text-[13px] font-semibold text-slate-700 dark:text-slate-300 mb-3">Playback Trend</h3>
-                    <MiniChart data={chartData} dataKey="plays" color="#10b981" />
-                </div>
-                <div className="glass-card p-5">
-                    <h3 className="text-[13px] font-semibold text-slate-700 dark:text-slate-300 mb-3">Requests Per Day</h3>
-                    <MiniChart data={chartData} dataKey="validations" color="#f59e0b" type="bar" />
+                <div className="glass-card p-5 lg:col-span-1">
+                    <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-[13px] font-semibold text-slate-700 dark:text-slate-300">License Health Overview</h3>
+                        <span className="text-[10px] text-slate-400">All Time</span>
+                    </div>
+                    <LicenseStatusChart data={licenseHealthData} />
+                    <div className="flex items-center justify-center gap-4 mt-3">
+                        {licenseHealthData.map((d, i) => (
+                            <div key={i} className="flex items-center gap-1.5">
+                                <span className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: d.color }} />
+                                <span className="text-[10px] text-slate-500">{d.name} <span className="font-semibold text-slate-700 dark:text-slate-300">{d.value}</span></span>
+                            </div>
+                        ))}
+                    </div>
                 </div>
             </div>
 
-            {/* Top Plugins + System Health */}
+            {/* Top Plugins + Most Watched */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 {/* Top Plugins */}
                 <div className="glass-card p-5">
-                    <h3 className="text-[13px] font-semibold text-slate-700 dark:text-slate-300 mb-4">Top Plugins</h3>
+                    <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-[13px] font-semibold text-slate-700 dark:text-slate-300">Top Plugins</h3>
+                        <span className="text-[10px] text-slate-400">7 days</span>
+                    </div>
                     {topPlugins.length === 0 ? (
                         <div className="flex flex-col items-center justify-center py-8 gap-2">
                             <BarChart3Icon className="w-8 h-8 text-slate-200 dark:text-slate-700" />
                             <p className="text-[12px] text-slate-400">No plugin data yet</p>
                         </div>
                     ) : (
-                        <div className="space-y-3">
+                        <div className="space-y-2.5">
                             {topPlugins.map((p, i) => {
                                 const pct = Math.round((p.count / topPlugins[0].count) * 100);
+                                const colors = ['bg-indigo-500', 'bg-emerald-500', 'bg-amber-500', 'bg-blue-500', 'bg-purple-500', 'bg-pink-500', 'bg-teal-500', 'bg-rose-500'];
                                 return (
-                                    <div key={p.name} className="flex items-center gap-3">
-                                        <span className="text-[11px] text-slate-400 w-4 text-right">{i + 1}</span>
-                                        <div className="flex-1 min-w-0">
-                                            <div className="flex items-center justify-between mb-1">
-                                                <span className="text-[12px] font-medium text-slate-700 dark:text-slate-300 truncate">{p.name}</span>
-                                                <span className="text-[11px] text-slate-400 ml-2">{formatNumber(p.count)}</span>
+                                    <div key={p.name} className="group">
+                                        <div className="flex items-center justify-between mb-1">
+                                            <div className="flex items-center gap-2.5 min-w-0">
+                                                <span className={`w-5 h-5 rounded-md flex items-center justify-center text-[10px] font-bold text-white ${colors[i % colors.length]}`}>
+                                                    {i + 1}
+                                                </span>
+                                                <span className="text-[12px] font-medium text-slate-700 dark:text-slate-300 truncate">{cleanPluginName(p.name)}</span>
                                             </div>
-                                            <div className="progress-bar-track">
-                                                <div className="progress-bar-fill" style={{ width: `${pct}%` }} />
+                                            <span className="text-[11px] font-semibold text-slate-500 ml-2 tabular-nums">{formatNumber(p.count)}</span>
+                                        </div>
+                                        <div className="ml-[30px]">
+                                            <div className="h-1.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+                                                <div className={`h-full rounded-full ${colors[i % colors.length]} transition-all duration-700`} style={{ width: `${pct}%` }} />
                                             </div>
                                         </div>
                                     </div>
@@ -285,42 +383,35 @@ export default function Dashboard() {
                     )}
                 </div>
 
-                {/* System Health + Trust */}
-                <div className="space-y-4">
-                    <div className="glass-card p-5">
-                        <h3 className="text-[13px] font-semibold text-slate-700 dark:text-slate-300 mb-3">System Health</h3>
-                        <div className="grid grid-cols-2 gap-3">
-                            {[
-                                { label: 'API Server', ok: health?.uptime > 0, detail: health?.uptime ? `${Math.floor(health.uptime / 3600)}h uptime` : 'Unknown' },
-                                { label: 'Database', ok: true, detail: 'Operational' },
-                                { label: 'Rate Limiting', ok: true, detail: 'Active' },
-                                { label: 'JWT Auth', ok: true, detail: 'Enforced' },
-                            ].map(it => (
-                                <div key={it.label} className="flex items-center gap-2.5 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/50">
-                                    <StatusDot ok={it.ok} />
-                                    <div>
-                                        <div className="text-[12px] font-medium text-slate-700 dark:text-slate-300">{it.label}</div>
-                                        <div className="text-[10px] text-slate-400">{it.detail}</div>
+                {/* Most Watched Content */}
+                <div className="glass-card p-5">
+                    <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-[13px] font-semibold text-slate-700 dark:text-slate-300">Most Watched</h3>
+                        <span className="text-[10px] text-slate-400">7 days</span>
+                    </div>
+                    {topContent.length === 0 ? (
+                        <div className="flex flex-col items-center justify-center py-8 gap-2">
+                            <Play className="w-8 h-8 text-slate-200 dark:text-slate-700" />
+                            <p className="text-[12px] text-slate-400">No playback data yet</p>
+                        </div>
+                    ) : (
+                        <div className="space-y-1">
+                            {topContent.map((c, i) => (
+                                <div key={i} className="flex items-center gap-3 py-2.5 px-3 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
+                                    <div className="w-7 h-7 rounded-lg bg-amber-50 dark:bg-amber-500/10 flex items-center justify-center shrink-0">
+                                        <Play className="w-3 h-3 text-amber-500" />
+                                    </div>
+                                    <div className="flex-1 min-w-0">
+                                        <div className="text-[12px] font-medium text-slate-700 dark:text-slate-300 truncate">{c.video_title || 'Unknown'}</div>
+                                        <div className="text-[10px] text-slate-400 truncate">{cleanPluginName(c.plugin_name)}</div>
+                                    </div>
+                                    <div className="text-right shrink-0">
+                                        <div className="text-[12px] font-semibold text-slate-600 dark:text-slate-400 tabular-nums">{c.play_count}×</div>
                                     </div>
                                 </div>
                             ))}
                         </div>
-                    </div>
-                    <div className="glass-card p-4">
-                        <div className="flex items-center gap-4 flex-wrap">
-                            {[
-                                { icon: Lock, label: 'Secure API', color: 'text-emerald-500' },
-                                { icon: ShieldCheck, label: 'Rate Protected', color: 'text-blue-500' },
-                                { icon: Zap, label: 'High Performance', color: 'text-amber-500' },
-                                { icon: Globe, label: 'CORS Configured', color: 'text-purple-500' },
-                            ].map(s => (
-                                <div key={s.label} className="flex items-center gap-1.5">
-                                    <s.icon className={`w-3.5 h-3.5 ${s.color}`} />
-                                    <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">{s.label}</span>
-                                </div>
-                            ))}
-                        </div>
-                    </div>
+                    )}
                 </div>
             </div>
 
@@ -333,88 +424,45 @@ export default function Dashboard() {
                         <span className="text-[11px] text-slate-400">Live</span>
                     </div>
                 </div>
-                <div className="overflow-x-auto">
-                    <table className="data-table">
-                        <thead>
-                            <tr>
-                                <th>Action</th>
-                                <th>License Key</th>
-                                <th>IP Address</th>
-                                <th>Detail</th>
-                                <th>Time</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {feed.length === 0 ? (
-                                <tr><td colSpan={5} className="text-center py-10 text-[13px] text-slate-400">No recent activity</td></tr>
-                            ) : feed.slice(0, 20).map((item, i) => (
-                                <tr key={i} className="fade-in">
-                                    <td>
-                                        <span className={`badge ${eventTypeColor(item.action || item.type)}`}>
+                {feed.length === 0 ? (
+                    <div className="py-12 text-center text-[13px] text-slate-400">No recent activity</div>
+                ) : (
+                    <div className="divide-y divide-slate-50 dark:divide-slate-800/50">
+                        {feed.slice(0, 15).map((item, i) => (
+                            <div key={i} className="flex items-center gap-3 px-5 py-3 hover:bg-slate-50/50 dark:hover:bg-slate-800/20 transition-colors fade-in">
+                                <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${item.type === 'playback'
+                                    ? 'bg-amber-50 dark:bg-amber-500/10'
+                                    : 'bg-indigo-50 dark:bg-indigo-500/10'
+                                    }`}>
+                                    {item.type === 'playback'
+                                        ? <Play className="w-3.5 h-3.5 text-amber-500" />
+                                        : <Activity className="w-3.5 h-3.5 text-indigo-500" />
+                                    }
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-[12px] font-medium text-slate-700 dark:text-slate-300 truncate">
+                                            {cleanPluginName(item.plugin_name) || item.video_title || item.detail || '—'}
+                                        </span>
+                                        <span className={`badge ${eventTypeColor(item.action || item.type)} text-[9px] shrink-0`}>
                                             {item.action || (item.type === 'playback' ? 'PLAY' : 'USE')}
                                         </span>
-                                    </td>
-                                    <td>
-                                        <button onClick={() => copyText(item.license_key)} className="font-mono text-[11px] text-indigo-600 dark:text-indigo-400 hover:underline flex items-center gap-1 break-all text-left">
-                                            {item.license_key} <Copy className="w-3 h-3 opacity-40 shrink-0" />
-                                        </button>
-                                    </td>
-                                    <td className="text-slate-500 text-[11px] font-mono">{item.ip_address || '—'}</td>
-                                    <td className="text-slate-600 dark:text-slate-400 text-[12px] min-w-[180px] break-words">
-                                        {cleanPluginName(item.plugin_name) || item.video_title || item.detail || '—'}
-                                    </td>
-                                    <td className="text-slate-400 text-[11px] whitespace-nowrap">{timeAgo(item.timestamp)}</td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
-            {/* Generate License Modal */}
-            {genModal && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => { setGenModal(false); setGenResult(null); }}>
-                    <div className="bg-white dark:bg-[#0d1424] rounded-2xl shadow-2xl w-full max-w-md p-6 m-4 slide-in-up" onClick={e => e.stopPropagation()}>
-                        <h2 className="text-[16px] font-bold text-slate-900 dark:text-white mb-5">Generate License Key</h2>
-                        <form onSubmit={handleGenerate} className="space-y-4">
-                            <div>
-                                <label className="block text-[12px] font-semibold text-slate-600 dark:text-slate-400 mb-1.5">Label (optional)</label>
-                                <input value={genForm.name} onChange={e => setGenForm({ ...genForm, name: e.target.value })} className="form-input" placeholder="Customer name or purpose" />
-                            </div>
-                            <div>
-                                <label className="block text-[12px] font-semibold text-slate-600 dark:text-slate-400 mb-1.5">Note (optional)</label>
-                                <input value={genForm.note} onChange={e => setGenForm({ ...genForm, note: e.target.value })} className="form-input" placeholder="Internal note" />
-                            </div>
-                            <div className="grid grid-cols-3 gap-3">
-                                <div>
-                                    <label className="block text-[12px] font-semibold text-slate-600 dark:text-slate-400 mb-1.5">Days</label>
-                                    <input type="number" value={genForm.duration_days} onChange={e => setGenForm({ ...genForm, duration_days: parseInt(e.target.value) || 30 })} className="form-input" min={1} max={3650} />
+                                    </div>
+                                    <div className="flex items-center gap-2 mt-0.5 text-[10px] text-slate-400">
+                                        {item.device_name && <span>{item.device_name}</span>}
+                                        {item.device_name && item.ip_address && <span>·</span>}
+                                        {item.ip_address && <span className="font-mono">{item.ip_address}</span>}
+                                        {item.video_title && item.plugin_name && (
+                                            <><span>·</span><span className="truncate">{item.video_title}</span></>
+                                        )}
+                                    </div>
                                 </div>
-                                <div>
-                                    <label className="block text-[12px] font-semibold text-slate-600 dark:text-slate-400 mb-1.5">Devices</label>
-                                    <input type="number" value={genForm.max_devices} onChange={e => setGenForm({ ...genForm, max_devices: parseInt(e.target.value) || 2 })} className="form-input" min={1} max={20} />
-                                </div>
-                                <div>
-                                    <label className="block text-[12px] font-semibold text-slate-600 dark:text-slate-400 mb-1.5">Count</label>
-                                    <input type="number" value={genForm.count} onChange={e => setGenForm({ ...genForm, count: parseInt(e.target.value) || 1 })} className="form-input" min={1} max={100} />
-                                </div>
+                                <span className="text-[10px] text-slate-400 shrink-0 whitespace-nowrap">{timeAgo(item.timestamp)}</span>
                             </div>
-                            {genResult && (
-                                <div className="bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/20 rounded-xl p-3">
-                                    <div className="text-[12px] font-semibold text-emerald-700 dark:text-emerald-400 mb-1">License Created!</div>
-                                    <div className="font-mono text-[11px] text-emerald-600 dark:text-emerald-400 break-all">{typeof genResult === 'string' ? genResult : JSON.stringify(genResult)}</div>
-                                </div>
-                            )}
-                            <div className="flex gap-3 pt-1">
-                                <button type="button" onClick={() => { setGenModal(false); setGenResult(null); }} className="btn-ghost flex-1 justify-center">Cancel</button>
-                                <button type="submit" disabled={genLoading} className="btn-primary flex-1 justify-center">
-                                    {genLoading ? 'Creating…' : `Generate${genForm.count > 1 ? ` (${genForm.count})` : ''}`}
-                                </button>
-                            </div>
-                        </form>
+                        ))}
                     </div>
-                </div>
-            )}
+                )}
+            </div>
         </div>
     );
 }

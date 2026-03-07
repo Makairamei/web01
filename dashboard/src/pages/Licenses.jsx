@@ -47,6 +47,9 @@ export default function Licenses() {
     const [genModal, setGenModal] = useState(false);
     const [confirm, setConfirm] = useState(null);    // { title, msg, action }
     const [activeDrawerTab, setActiveDrawerTab] = useState('devices');
+    const [pluginPage, setPluginPage] = useState(1);
+    const [playbackPage, setPlaybackPage] = useState(1);
+    const DRAWER_PAGE_SIZE = 20;
 
     const { data, loading, refetch } = useApi(
         `/admin/licenses?page=${page}&limit=${LIMIT}&search=${encodeURIComponent(search)}&status=${statusFilter}`,
@@ -75,6 +78,8 @@ export default function Licenses() {
         setDrawerData(null);
         setDrawerLoading(true);
         setActiveDrawerTab('devices');
+        setPluginPage(1);
+        setPlaybackPage(1);
         try {
             const d = await get(`/admin/licenses/${lic.id}/details`);
             setDrawerData(d);
@@ -378,7 +383,9 @@ export default function Licenses() {
                                                     <div className="flex flex-col items-end gap-1.5">
                                                         {d.is_blocked
                                                             ? <span className="badge badge-blocked py-0.5 px-1.5 text-[9px]">Blocked</span>
-                                                            : <span className="badge badge-active py-0.5 px-1.5 text-[9px]">Active</span>
+                                                            : d.is_online
+                                                                ? <span className="badge badge-active py-0.5 px-1.5 text-[9px]">Online</span>
+                                                                : <span className="badge badge-expired py-0.5 px-1.5 text-[9px]">Offline</span>
                                                         }
                                                         <div className="flex items-center gap-1.5">
                                                             <button
@@ -425,63 +432,141 @@ export default function Licenses() {
                                 )}
 
                                 {/* Plugins Tab */}
-                                {activeDrawerTab === 'plugins' && (
-                                    <div className="space-y-1">
-                                        {drawerData.pluginUsage?.length === 0 && (
-                                            <div className="py-8 text-center text-[13px] text-slate-400">No plugin activity</div>
-                                        )}
-                                        {drawerData.pluginUsage?.slice(0, 30).map((p, i) => (
-                                            <div key={i} className="flex items-center justify-between py-2 px-3 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/40">
-                                                <div>
-                                                    <span className="text-[12px] font-medium text-slate-800 dark:text-slate-200">{cleanPluginName(p.plugin_name)}</span>
-                                                    <span className="ml-2 badge badge-info text-[9px]">{p.action}</span>
-                                                    {p.device_name && (
-                                                        <span className="ml-2 text-[10px] text-slate-400" title={p.device_id ? `ID: ${p.device_id}` : ''}>
-                                                            {p.device_name}
-                                                            {p.device_id && <span className="opacity-50 ml-1">({p.device_id.substring(0, 8)}…)</span>}
-                                                        </span>
-                                                    )}
-                                                </div>
-                                                <span className="text-[10px] text-slate-400">{formatWIB(p.used_at)}</span>
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
-
-                                {/* Playback Tab */}
-                                {activeDrawerTab === 'playback' && (
-                                    <div className="space-y-2">
-                                        {drawerData.playbackLogs?.length === 0 && (
-                                            <div className="py-8 text-center text-[13px] text-slate-400">No playback activity</div>
-                                        )}
-                                        {drawerData.playbackLogs?.slice(0, 20).map((p, i) => (
-                                            <div key={i} className="p-3 rounded-xl border border-slate-100 dark:border-slate-800">
-                                                <div className="flex items-start gap-2">
-                                                    <div className="mt-0.5 p-1.5 rounded-lg bg-amber-50 dark:bg-amber-500/10">
-                                                        <Play className="w-3 h-3 text-amber-500" />
+                                {activeDrawerTab === 'plugins' && (() => {
+                                    const allPlugins = drawerData.pluginUsage || [];
+                                    const totalPluginPages = Math.max(1, Math.ceil(allPlugins.length / DRAWER_PAGE_SIZE));
+                                    const pStart = (pluginPage - 1) * DRAWER_PAGE_SIZE;
+                                    const pagePlugins = allPlugins.slice(pStart, pStart + DRAWER_PAGE_SIZE);
+                                    return (
+                                        <div className="space-y-1">
+                                            {allPlugins.length === 0 ? (
+                                                <div className="py-8 text-center text-[13px] text-slate-400">No plugin activity</div>
+                                            ) : (
+                                                <>
+                                                    <div className="text-[11px] text-slate-400 mb-2 px-1">
+                                                        Showing {pStart + 1}–{Math.min(pStart + DRAWER_PAGE_SIZE, allPlugins.length)} of {allPlugins.length} entries
                                                     </div>
-                                                    <div className="flex-1 min-w-0">
-                                                        <div className="text-[12px] font-medium text-slate-800 dark:text-slate-200 truncate">{p.video_title || 'Unknown'}</div>
-                                                        <div className="flex items-center gap-2 mt-0.5 text-[10px] text-slate-400">
-                                                            <span>{cleanPluginName(p.plugin_name)}</span>
-                                                            {p.source_provider && <><span>·</span><span>{p.source_provider}</span></>}
-                                                            {p.device_name && (
-                                                                <>
-                                                                    <span>·</span>
-                                                                    <span title={p.device_id ? `ID: ${p.device_id}` : ''}>
+                                                    {pagePlugins.map((p, i) => (
+                                                        <div key={pStart + i} className="flex items-center justify-between py-2.5 px-3 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
+                                                            <div className="min-w-0 flex-1">
+                                                                <span className="text-[12px] font-medium text-slate-800 dark:text-slate-200">{cleanPluginName(p.plugin_name)}</span>
+                                                                <span className="ml-2 badge badge-info text-[9px]">{p.action}</span>
+                                                                {p.device_name && (
+                                                                    <span className="ml-2 text-[10px] text-slate-400" title={p.device_id ? `ID: ${p.device_id}` : ''}>
                                                                         {p.device_name}
                                                                         {p.device_id && <span className="opacity-50 ml-1">({p.device_id.substring(0, 8)}…)</span>}
                                                                     </span>
-                                                                </>
-                                                            )}
+                                                                )}
+                                                            </div>
+                                                            <span className="text-[10px] text-slate-400 shrink-0 ml-2">{formatWIB(p.used_at)}</span>
                                                         </div>
+                                                    ))}
+                                                    {/* Pagination */}
+                                                    {totalPluginPages > 1 && (
+                                                        <div className="flex items-center justify-center gap-1 pt-3 pb-1">
+                                                            <button disabled={pluginPage <= 1} onClick={() => setPluginPage(p => p - 1)}
+                                                                className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 transition-colors">
+                                                                <ChevronLeft className="w-3.5 h-3.5" />
+                                                            </button>
+                                                            {Array.from({ length: Math.min(totalPluginPages, 5) }, (_, i) => {
+                                                                let pg;
+                                                                if (totalPluginPages <= 5) pg = i + 1;
+                                                                else if (pluginPage <= 3) pg = i + 1;
+                                                                else if (pluginPage >= totalPluginPages - 2) pg = totalPluginPages - 4 + i;
+                                                                else pg = pluginPage - 2 + i;
+                                                                if (pg < 1 || pg > totalPluginPages) return null;
+                                                                return (
+                                                                    <button key={pg} onClick={() => setPluginPage(pg)}
+                                                                        className={`w-7 h-7 rounded-lg text-[11px] font-semibold transition-colors ${pg === pluginPage ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'}`}>
+                                                                        {pg}
+                                                                    </button>
+                                                                );
+                                                            })}
+                                                            <button disabled={pluginPage >= totalPluginPages} onClick={() => setPluginPage(p => p + 1)}
+                                                                className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 transition-colors">
+                                                                <ChevronRight className="w-3.5 h-3.5" />
+                                                            </button>
+                                                        </div>
+                                                    )}
+                                                </>
+                                            )}
+                                        </div>
+                                    );
+                                })()}
+
+                                {/* Playback Tab */}
+                                {activeDrawerTab === 'playback' && (() => {
+                                    const allPlaybacks = drawerData.playbackLogs || [];
+                                    const totalPlaybackPages = Math.max(1, Math.ceil(allPlaybacks.length / DRAWER_PAGE_SIZE));
+                                    const pbStart = (playbackPage - 1) * DRAWER_PAGE_SIZE;
+                                    const pagePlaybacks = allPlaybacks.slice(pbStart, pbStart + DRAWER_PAGE_SIZE);
+                                    return (
+                                        <div className="space-y-2">
+                                            {allPlaybacks.length === 0 ? (
+                                                <div className="py-8 text-center text-[13px] text-slate-400">No playback activity</div>
+                                            ) : (
+                                                <>
+                                                    <div className="text-[11px] text-slate-400 mb-2 px-1">
+                                                        Showing {pbStart + 1}–{Math.min(pbStart + DRAWER_PAGE_SIZE, allPlaybacks.length)} of {allPlaybacks.length} entries
                                                     </div>
-                                                    <span className="text-[10px] text-slate-400 shrink-0">{formatWIB(p.played_at)}</span>
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
+                                                    {pagePlaybacks.map((p, i) => (
+                                                        <div key={pbStart + i} className="p-3 rounded-xl border border-slate-100 dark:border-slate-800 hover:border-slate-200 dark:hover:border-slate-700 transition-colors">
+                                                            <div className="flex items-start gap-2">
+                                                                <div className="mt-0.5 p-1.5 rounded-lg bg-amber-50 dark:bg-amber-500/10">
+                                                                    <Play className="w-3 h-3 text-amber-500" />
+                                                                </div>
+                                                                <div className="flex-1 min-w-0">
+                                                                    <div className="text-[12px] font-medium text-slate-800 dark:text-slate-200 truncate">{p.video_title || 'Unknown'}</div>
+                                                                    <div className="flex items-center gap-2 mt-0.5 text-[10px] text-slate-400">
+                                                                        <span>{cleanPluginName(p.plugin_name)}</span>
+                                                                        {p.source_provider && <><span>·</span><span>{p.source_provider}</span></>}
+                                                                        {p.device_name && (
+                                                                            <>
+                                                                                <span>·</span>
+                                                                                <span title={p.device_id ? `ID: ${p.device_id}` : ''}>
+                                                                                    {p.device_name}
+                                                                                    {p.device_id && <span className="opacity-50 ml-1">({p.device_id.substring(0, 8)}…)</span>}
+                                                                                </span>
+                                                                            </>
+                                                                        )}
+                                                                    </div>
+                                                                </div>
+                                                                <span className="text-[10px] text-slate-400 shrink-0">{formatWIB(p.played_at)}</span>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                    {/* Pagination */}
+                                                    {totalPlaybackPages > 1 && (
+                                                        <div className="flex items-center justify-center gap-1 pt-3 pb-1">
+                                                            <button disabled={playbackPage <= 1} onClick={() => setPlaybackPage(p => p - 1)}
+                                                                className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 transition-colors">
+                                                                <ChevronLeft className="w-3.5 h-3.5" />
+                                                            </button>
+                                                            {Array.from({ length: Math.min(totalPlaybackPages, 5) }, (_, i) => {
+                                                                let pg;
+                                                                if (totalPlaybackPages <= 5) pg = i + 1;
+                                                                else if (playbackPage <= 3) pg = i + 1;
+                                                                else if (playbackPage >= totalPlaybackPages - 2) pg = totalPlaybackPages - 4 + i;
+                                                                else pg = playbackPage - 2 + i;
+                                                                if (pg < 1 || pg > totalPlaybackPages) return null;
+                                                                return (
+                                                                    <button key={pg} onClick={() => setPlaybackPage(pg)}
+                                                                        className={`w-7 h-7 rounded-lg text-[11px] font-semibold transition-colors ${pg === playbackPage ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'}`}>
+                                                                        {pg}
+                                                                    </button>
+                                                                );
+                                                            })}
+                                                            <button disabled={playbackPage >= totalPlaybackPages} onClick={() => setPlaybackPage(p => p + 1)}
+                                                                className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 transition-colors">
+                                                                <ChevronRight className="w-3.5 h-3.5" />
+                                                            </button>
+                                                        </div>
+                                                    )}
+                                                </>
+                                            )}
+                                        </div>
+                                    );
+                                })()}
 
                                 {/* Info Tab */}
                                 {activeDrawerTab === 'info' && (
