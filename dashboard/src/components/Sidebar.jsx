@@ -1,11 +1,12 @@
-import { useRef, useEffect } from 'react';
+import { useRef, useEffect, useState, useCallback } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { useLayout } from '../contexts/LayoutContext';
 import { useAnalytics } from '../hooks/useAnalytics';
+import { get } from '../lib/api';
 import Tooltip from './Tooltip';
 import {
     LayoutDashboard, KeyRound, Smartphone, Activity, BarChart3,
-    Play, Shield, Settings, Zap, TrendingUp, Radio,
+    Play, Shield, ShieldAlert, Settings, Zap, TrendingUp, Radio,
     ChevronLeft, ChevronRight, Menu, ClipboardList
 } from 'lucide-react';
 
@@ -53,6 +54,17 @@ export default function Sidebar() {
     const { track } = useAnalytics();
     const sidebarRef = useRef(null);
     const location = useLocation();
+    const [abuseCount, setAbuseCount] = useState(0);
+
+    // Fetch unread abuse alert count
+    useEffect(() => {
+        const fetchCount = async () => {
+            try { const d = await get('/admin/abuse-alerts/count'); setAbuseCount(d?.count || 0); } catch { }
+        };
+        fetchCount();
+        const id = setInterval(fetchCount, 30000);
+        return () => clearInterval(id);
+    }, []);
 
     // Interaction Lock: Don't expand on hover if currently toggling
     const handleMouseEnter = () => {
@@ -154,6 +166,11 @@ export default function Sidebar() {
                                                         <item.icon className={`w-[20px] h-[20px] transition-colors ${isActive ? 'text-indigo-600 dark:text-indigo-400' : 'opacity-70 group-hover:opacity-100'}`} />
                                                         {item.live && (
                                                             <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 bg-emerald-500 rounded-full pulse-dot border-2 border-white dark:border-[#080e1c]" />
+                                                        )}
+                                                        {item.abuseBadge && abuseCount > 0 && (
+                                                            <span className="absolute -top-1 -right-1 min-w-[16px] h-[16px] flex items-center justify-center bg-red-500 text-white text-[8px] font-bold rounded-full px-1 border-2 border-white dark:border-[#080e1c] animate-pulse">
+                                                                {abuseCount > 99 ? '99+' : abuseCount}
+                                                            </span>
                                                         )}
                                                     </div>
 

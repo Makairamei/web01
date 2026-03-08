@@ -12,6 +12,7 @@ import PlaybackLogs from './pages/PlaybackLogs';
 import PluginAnalytics from './pages/PluginAnalytics';
 import Analytics from './pages/Analytics';
 import Security from './pages/Security';
+import AbuseAlerts from './pages/AbuseAlerts';
 import SettingsPage from './pages/Settings';
 import AdminLogs from './pages/AdminLogs';
 
@@ -37,6 +38,7 @@ export default function App() {
                         <Route path="/activity/plugins" element={<PluginAnalytics />} />
                         <Route path="/analytics" element={<Analytics />} />
                         <Route path="/security" element={<Security />} />
+                        <Route path="/security/abuse" element={<Navigate to="/security" replace />} />
                         <Route path="/settings" element={<SettingsPage />} />
                         <Route path="/admin-logs" element={<AdminLogs />} />
                     </Route>

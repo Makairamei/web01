@@ -1,4 +1,5 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { createPortal } from 'react-dom';
 import { get, del, put, post, formatWIB, daysUntil, copyText, truncKey } from '../lib/api';
 import { useApi } from '../hooks/useApi';
@@ -7,26 +8,13 @@ import ConfirmModal from '../components/ConfirmModal';
 import {
     Search, ChevronLeft, ChevronRight, RefreshCw, X, Plus,
     Copy, MoreVertical, CheckSquare, Square, ShieldOff, ShieldCheck,
-    Trash2, Pencil, Eye, Server, Activity, Play, Globe, Check, Download, Ban
+    Trash2, Pencil, Eye, Server, Activity, Play, Globe, Check, Download, Ban,
+    Clock, Calendar, AlertTriangle, Filter
 } from 'lucide-react';
 import { cleanPluginName } from '../lib/api';
+import LicenseDrawer, { statusBadge, expiryBadge } from '../components/LicenseDrawer';
 
 /* ─── helpers ─────────────────────────────────────────────── */
-
-function expiryBadge(expiresAt) {
-    const d = daysUntil(expiresAt);
-    if (d === null) return <span className="badge badge-info">N/A</span>;
-    if (d < 0) return <span className="badge badge-expired">{Math.abs(d)}d ago</span>;
-    if (d === 0) return <span className="badge badge-warning">Today</span>;
-    if (d <= 7) return <span className="badge badge-warning">{d}d left</span>;
-    if (d <= 30) return <span className="badge badge-info">{d}d left</span>;
-    return <span className="badge badge-active">{d}d left</span>;
-}
-
-function statusBadge(status) {
-    const map = { active: 'badge-active', expired: 'badge-expired', revoked: 'badge-revoked', suspended: 'badge-suspended' };
-    return <span className={`badge ${map[status] || 'badge-info'}`}>{status}</span>;
-}
 
 const LIMIT = 10;
 
@@ -35,10 +23,12 @@ export default function Licenses() {
     const toast = useToast();
 
     // state
+    const [searchParams, setSearchParams] = useSearchParams();
     const [page, setPage] = useState(1);
-    const [search, setSearch] = useState('');
-    const [searchInput, setSearchInput] = useState('');
+    const [search, setSearch] = useState(() => searchParams.get('search') || '');
+    const [searchInput, setSearchInput] = useState(() => searchParams.get('search') || '');
     const [statusFilter, setStatus] = useState('');
+    const [dateRange, setDateRange] = useState('');
     const [selected, setSelected] = useState(new Set());
     const [drawer, setDrawer] = useState(null);    // license obj for detail view
     const [drawerData, setDrawerData] = useState(null);  // enriched from API
@@ -46,19 +36,27 @@ export default function Licenses() {
     const [editModal, setEditModal] = useState(null);
     const [genModal, setGenModal] = useState(false);
     const [confirm, setConfirm] = useState(null);    // { title, msg, action }
-    const [activeDrawerTab, setActiveDrawerTab] = useState('devices');
-    const [pluginPage, setPluginPage] = useState(1);
-    const [playbackPage, setPlaybackPage] = useState(1);
-    const DRAWER_PAGE_SIZE = 20;
+
+    // Compute date_from ISO string from dateRange
+    const dateFrom = (() => {
+        if (!dateRange) return '';
+        const now = new Date();
+        if (dateRange === '7d') return new Date(now - 7 * 86400000).toISOString();
+        if (dateRange === '30d') return new Date(now - 30 * 86400000).toISOString();
+        if (dateRange === '90d') return new Date(now - 90 * 86400000).toISOString();
+        if (dateRange === 'year') return new Date(now.getFullYear(), 0, 1).toISOString();
+        return '';
+    })();
 
     const { data, loading, refetch } = useApi(
-        `/admin/licenses?page=${page}&limit=${LIMIT}&search=${encodeURIComponent(search)}&status=${statusFilter}`,
-        [page, search, statusFilter]
+        `/admin/licenses?page=${page}&limit=${LIMIT}&search=${encodeURIComponent(search)}&status=${statusFilter}&date_from=${encodeURIComponent(dateFrom)}`,
+        [page, search, statusFilter, dateFrom]
     );
 
     const licenses = data?.licenses || [];
     const total = data?.total || 0;
     const totalPages = Math.ceil(total / LIMIT);
+    const counts = data?.counts || {};
     const allSelected = licenses.length > 0 && licenses.every(l => selected.has(l.id));
 
     /* ─── selection ──────────────────────────────────────── */
@@ -77,9 +75,6 @@ export default function Licenses() {
         setDrawer(lic);
         setDrawerData(null);
         setDrawerLoading(true);
-        setActiveDrawerTab('devices');
-        setPluginPage(1);
-        setPlaybackPage(1);
         try {
             const d = await get(`/admin/licenses/${lic.id}/details`);
             setDrawerData(d);
@@ -171,11 +166,12 @@ export default function Licenses() {
                         />
                     </div>
                 </form>
-                <select value={statusFilter} onChange={e => { setStatus(e.target.value); setPage(1); }} className="form-select text-[12px]">
-                    <option value="">All status</option>
-                    <option value="active">Active</option>
-                    <option value="expired">Expired</option>
-                    <option value="revoked">Revoked</option>
+                <select value={dateRange} onChange={e => { setDateRange(e.target.value); setPage(1); }} className="form-select text-[12px]">
+                    <option value="">All Time</option>
+                    <option value="7d">Last 7 Days</option>
+                    <option value="30d">Last 30 Days</option>
+                    <option value="90d">Last 90 Days</option>
+                    <option value="year">This Year</option>
                 </select>
                 <button onClick={doExport} className="btn-ghost text-[12px] py-2 whitespace-nowrap hidden sm:flex">
                     <Download className="w-3.5 h-3.5" /> Export CSV
@@ -186,6 +182,35 @@ export default function Licenses() {
                 <button onClick={() => { setGenModal(true); setGenResult(null); setGenForm({ name: '', duration_days: 30, max_devices: 2, count: 1, note: '' }); }} className="btn-primary text-[12px] py-2">
                     <Plus className="w-3.5 h-3.5" /> New License
                 </button>
+            </div>
+
+            {/* ── Status Filter Pills ── */}
+            <div className="flex flex-wrap items-center gap-1.5">
+                {[
+                    { key: '', label: 'All', color: 'slate', icon: null },
+                    { key: 'active', label: 'Active', color: 'emerald', icon: null },
+                    { key: 'expiring_soon', label: 'Expiring Soon', color: 'amber', icon: AlertTriangle },
+                    { key: 'expired', label: 'Expired', color: 'red', icon: null },
+                    { key: 'revoked', label: 'Revoked', color: 'purple', icon: null },
+                ].map(s => {
+                    const isActive = statusFilter === s.key;
+                    const count = s.key === '' ? counts.all : counts[s.key];
+                    const colorMap = {
+                        slate: isActive ? 'bg-slate-700 text-white dark:bg-slate-200 dark:text-slate-900' : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700',
+                        emerald: isActive ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-500/10 dark:text-emerald-400 dark:hover:bg-emerald-500/20',
+                        amber: isActive ? 'bg-amber-500 text-white' : 'bg-amber-50 text-amber-700 hover:bg-amber-100 dark:bg-amber-500/10 dark:text-amber-400 dark:hover:bg-amber-500/20',
+                        red: isActive ? 'bg-red-600 text-white' : 'bg-red-50 text-red-700 hover:bg-red-100 dark:bg-red-500/10 dark:text-red-400 dark:hover:bg-red-500/20',
+                        purple: isActive ? 'bg-purple-600 text-white' : 'bg-purple-50 text-purple-700 hover:bg-purple-100 dark:bg-purple-500/10 dark:text-purple-400 dark:hover:bg-purple-500/20',
+                    };
+                    return (
+                        <button key={s.key} onClick={() => { setStatus(s.key); setPage(1); }}
+                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-all duration-200 ${colorMap[s.color]}`}>
+                            {s.icon && <s.icon className="w-3 h-3" />}
+                            {s.label}
+                            {count !== undefined && <span className={`ml-0.5 text-[10px] font-bold ${isActive ? 'opacity-80' : 'opacity-60'}`}>{count}</span>}
+                        </button>
+                    );
+                })}
             </div>
 
             {/* ── Bulk action bar ── */}
@@ -316,293 +341,15 @@ export default function Licenses() {
             {/* ══════════════════════════════════════
                 DETAIL DRAWER
                 ══════════════════════════════════════ */}
-            {drawer && createPortal(
-                <>
-                    <div className="drawer-overlay" onClick={() => setDrawer(null)} />
-                    <div className="drawer-panel">
-                        {/* Header */}
-                        <div className="flex items-start justify-between p-5 border-b border-slate-100 dark:border-slate-800">
-                            <div>
-                                {drawer.name && <div className="text-[15px] font-bold text-slate-900 dark:text-white mb-0.5">{drawer.name}</div>}
-                                <button onClick={() => copyText(drawer.license_key)} className="flex items-center gap-1.5 font-mono text-[12px] text-indigo-600 dark:text-indigo-400 hover:underline">
-                                    {drawer.license_key} <Copy className="w-3 h-3 opacity-50" />
-                                </button>
-                                <div className="flex items-center gap-2 mt-1.5">
-                                    {statusBadge(drawer.status)}
-                                    {expiryBadge(drawer.expires_at)}
-                                </div>
-                            </div>
-                            <button onClick={() => setDrawer(null)} className="p-1.5 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400">
-                                <X className="w-4 h-4" />
-                            </button>
-                        </div>
-
-                        {/* Tabs */}
-                        <div className="flex gap-1 m-4 mb-0 p-1 bg-slate-100 dark:bg-slate-800/60 rounded-xl">
-                            {[
-                                { id: 'devices', label: 'Devices', icon: Server },
-                                { id: 'plugins', label: 'Plugins', icon: Activity },
-                                { id: 'playback', label: 'Playback', icon: Play },
-                                { id: 'info', label: 'Info', icon: Globe },
-                            ].map(t => (
-                                <button key={t.id} onClick={() => setActiveDrawerTab(t.id)}
-                                    className={`flex items-center gap-1.5 flex-1 justify-center px-2 py-1.5 rounded-lg text-[11px] font-semibold transition-all ${activeDrawerTab === t.id ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-sm' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}>
-                                    <t.icon className="w-3 h-3" /> {t.label}
-                                </button>
-                            ))}
-                        </div>
-
-                        {drawerLoading ? (
-                            <div className="p-5 space-y-3">
-                                {[...Array(4)].map((_, i) => <div key={i} className="skeleton h-12 rounded-xl" />)}
-                            </div>
-                        ) : !drawerData ? (
-                            <div className="p-8 text-center text-[13px] text-slate-400">Failed to load details</div>
-                        ) : (
-                            <div className="p-4">
-                                {/* Devices Tab */}
-                                {activeDrawerTab === 'devices' && (
-                                    <div className="space-y-2">
-                                        {drawerData.devices?.length === 0 && (
-                                            <div className="py-8 text-center text-[13px] text-slate-400">No devices registered</div>
-                                        )}
-                                        {drawerData.devices?.map((d, i) => (
-                                            <div key={d.id} className="p-3.5 rounded-xl border border-slate-100 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/30">
-                                                <div className="flex items-center justify-between mb-1">
-                                                    <div className="flex items-center gap-2">
-                                                        <div className="w-7 h-7 rounded-lg bg-indigo-100 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-400 flex items-center justify-center text-[11px] font-bold">
-                                                            {i + 1}
-                                                        </div>
-                                                        <div>
-                                                            <div className="text-[13px] font-semibold text-slate-800 dark:text-slate-200">
-                                                                {d.device_name || `Device ${i + 1}`}
-                                                            </div>
-                                                            <div className="text-[10px] font-mono text-slate-400 mt-0.5">{d.device_id?.substring(0, 20)}…</div>
-                                                        </div>
-                                                    </div>
-                                                    <div className="flex flex-col items-end gap-1.5">
-                                                        {d.is_blocked
-                                                            ? <span className="badge badge-blocked py-0.5 px-1.5 text-[9px]">Blocked</span>
-                                                            : d.is_online
-                                                                ? <span className="badge badge-active py-0.5 px-1.5 text-[9px]">Online</span>
-                                                                : <span className="badge badge-expired py-0.5 px-1.5 text-[9px]">Offline</span>
-                                                        }
-                                                        <div className="flex items-center gap-1.5">
-                                                            <button
-                                                                onClick={() => setConfirm({
-                                                                    title: d.is_blocked ? 'Unblock Device' : 'Block Device',
-                                                                    msg: d.is_blocked ? 'Allow this device to access the license again?' : 'Block this device from using the license?',
-                                                                    action: async () => {
-                                                                        await put(`/admin/devices/${d.id}`, { action: d.is_blocked ? 'unblock' : 'block' });
-                                                                        openDrawer(drawerData); // Refresh
-                                                                    }
-                                                                })}
-                                                                className={`p-1.5 rounded-lg text-white transition-colors ${d.is_blocked ? 'bg-emerald-500 hover:bg-emerald-600' : 'bg-amber-500 hover:bg-amber-600'}`}
-                                                                title={d.is_blocked ? "Unblock" : "Block"}
-                                                            >
-                                                                {d.is_blocked ? <ShieldCheck className="w-3 h-3" /> : <Ban className="w-3 h-3" />}
-                                                            </button>
-
-                                                            <button
-                                                                onClick={() => setConfirm({
-                                                                    title: 'Remove Device',
-                                                                    msg: 'Remove this device from the license? This will free up 1 slot.',
-                                                                    danger: true,
-                                                                    action: async () => {
-                                                                        await del(`/admin/devices/${d.id}`);
-                                                                        openDrawer({ ...drawerData, devices: drawerData.devices.filter(x => x.id !== d.id) });
-                                                                    }
-                                                                })}
-                                                                className="p-1.5 rounded-lg bg-red-500 hover:bg-red-600 text-white transition-colors"
-                                                                title="Remove / Unlink"
-                                                            >
-                                                                <Trash2 className="w-3 h-3" />
-                                                            </button>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                                <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-slate-500">
-                                                    <span>IP: <span className="font-mono text-slate-700 dark:text-slate-300">{d.ip_address || '—'}</span></span>
-                                                    <span>Last seen: {formatWIB(d.last_seen)}</span>
-                                                    <span>First seen: {formatWIB(d.first_seen)}</span>
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
-
-                                {/* Plugins Tab */}
-                                {activeDrawerTab === 'plugins' && (() => {
-                                    const allPlugins = drawerData.pluginUsage || [];
-                                    const totalPluginPages = Math.max(1, Math.ceil(allPlugins.length / DRAWER_PAGE_SIZE));
-                                    const pStart = (pluginPage - 1) * DRAWER_PAGE_SIZE;
-                                    const pagePlugins = allPlugins.slice(pStart, pStart + DRAWER_PAGE_SIZE);
-                                    return (
-                                        <div className="space-y-1">
-                                            {allPlugins.length === 0 ? (
-                                                <div className="py-8 text-center text-[13px] text-slate-400">No plugin activity</div>
-                                            ) : (
-                                                <>
-                                                    <div className="text-[11px] text-slate-400 mb-2 px-1">
-                                                        Showing {pStart + 1}–{Math.min(pStart + DRAWER_PAGE_SIZE, allPlugins.length)} of {allPlugins.length} entries
-                                                    </div>
-                                                    {pagePlugins.map((p, i) => (
-                                                        <div key={pStart + i} className="flex items-center justify-between py-2.5 px-3 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
-                                                            <div className="min-w-0 flex-1">
-                                                                <span className="text-[12px] font-medium text-slate-800 dark:text-slate-200">{cleanPluginName(p.plugin_name)}</span>
-                                                                <span className="ml-2 badge badge-info text-[9px]">{p.action}</span>
-                                                                {p.device_name && (
-                                                                    <span className="ml-2 text-[10px] text-slate-400" title={p.device_id ? `ID: ${p.device_id}` : ''}>
-                                                                        {p.device_name}
-                                                                        {p.device_id && <span className="opacity-50 ml-1">({p.device_id.substring(0, 8)}…)</span>}
-                                                                    </span>
-                                                                )}
-                                                            </div>
-                                                            <span className="text-[10px] text-slate-400 shrink-0 ml-2">{formatWIB(p.used_at)}</span>
-                                                        </div>
-                                                    ))}
-                                                    {/* Pagination */}
-                                                    {totalPluginPages > 1 && (
-                                                        <div className="flex items-center justify-center gap-1 pt-3 pb-1">
-                                                            <button disabled={pluginPage <= 1} onClick={() => setPluginPage(p => p - 1)}
-                                                                className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 transition-colors">
-                                                                <ChevronLeft className="w-3.5 h-3.5" />
-                                                            </button>
-                                                            {Array.from({ length: Math.min(totalPluginPages, 5) }, (_, i) => {
-                                                                let pg;
-                                                                if (totalPluginPages <= 5) pg = i + 1;
-                                                                else if (pluginPage <= 3) pg = i + 1;
-                                                                else if (pluginPage >= totalPluginPages - 2) pg = totalPluginPages - 4 + i;
-                                                                else pg = pluginPage - 2 + i;
-                                                                if (pg < 1 || pg > totalPluginPages) return null;
-                                                                return (
-                                                                    <button key={pg} onClick={() => setPluginPage(pg)}
-                                                                        className={`w-7 h-7 rounded-lg text-[11px] font-semibold transition-colors ${pg === pluginPage ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'}`}>
-                                                                        {pg}
-                                                                    </button>
-                                                                );
-                                                            })}
-                                                            <button disabled={pluginPage >= totalPluginPages} onClick={() => setPluginPage(p => p + 1)}
-                                                                className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 transition-colors">
-                                                                <ChevronRight className="w-3.5 h-3.5" />
-                                                            </button>
-                                                        </div>
-                                                    )}
-                                                </>
-                                            )}
-                                        </div>
-                                    );
-                                })()}
-
-                                {/* Playback Tab */}
-                                {activeDrawerTab === 'playback' && (() => {
-                                    const allPlaybacks = drawerData.playbackLogs || [];
-                                    const totalPlaybackPages = Math.max(1, Math.ceil(allPlaybacks.length / DRAWER_PAGE_SIZE));
-                                    const pbStart = (playbackPage - 1) * DRAWER_PAGE_SIZE;
-                                    const pagePlaybacks = allPlaybacks.slice(pbStart, pbStart + DRAWER_PAGE_SIZE);
-                                    return (
-                                        <div className="space-y-2">
-                                            {allPlaybacks.length === 0 ? (
-                                                <div className="py-8 text-center text-[13px] text-slate-400">No playback activity</div>
-                                            ) : (
-                                                <>
-                                                    <div className="text-[11px] text-slate-400 mb-2 px-1">
-                                                        Showing {pbStart + 1}–{Math.min(pbStart + DRAWER_PAGE_SIZE, allPlaybacks.length)} of {allPlaybacks.length} entries
-                                                    </div>
-                                                    {pagePlaybacks.map((p, i) => (
-                                                        <div key={pbStart + i} className="p-3 rounded-xl border border-slate-100 dark:border-slate-800 hover:border-slate-200 dark:hover:border-slate-700 transition-colors">
-                                                            <div className="flex items-start gap-2">
-                                                                <div className="mt-0.5 p-1.5 rounded-lg bg-amber-50 dark:bg-amber-500/10">
-                                                                    <Play className="w-3 h-3 text-amber-500" />
-                                                                </div>
-                                                                <div className="flex-1 min-w-0">
-                                                                    <div className="text-[12px] font-medium text-slate-800 dark:text-slate-200 truncate">{p.video_title || 'Unknown'}</div>
-                                                                    <div className="flex items-center gap-2 mt-0.5 text-[10px] text-slate-400">
-                                                                        <span>{cleanPluginName(p.plugin_name)}</span>
-                                                                        {p.source_provider && <><span>·</span><span>{p.source_provider}</span></>}
-                                                                        {p.device_name && (
-                                                                            <>
-                                                                                <span>·</span>
-                                                                                <span title={p.device_id ? `ID: ${p.device_id}` : ''}>
-                                                                                    {p.device_name}
-                                                                                    {p.device_id && <span className="opacity-50 ml-1">({p.device_id.substring(0, 8)}…)</span>}
-                                                                                </span>
-                                                                            </>
-                                                                        )}
-                                                                    </div>
-                                                                </div>
-                                                                <span className="text-[10px] text-slate-400 shrink-0">{formatWIB(p.played_at)}</span>
-                                                            </div>
-                                                        </div>
-                                                    ))}
-                                                    {/* Pagination */}
-                                                    {totalPlaybackPages > 1 && (
-                                                        <div className="flex items-center justify-center gap-1 pt-3 pb-1">
-                                                            <button disabled={playbackPage <= 1} onClick={() => setPlaybackPage(p => p - 1)}
-                                                                className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 transition-colors">
-                                                                <ChevronLeft className="w-3.5 h-3.5" />
-                                                            </button>
-                                                            {Array.from({ length: Math.min(totalPlaybackPages, 5) }, (_, i) => {
-                                                                let pg;
-                                                                if (totalPlaybackPages <= 5) pg = i + 1;
-                                                                else if (playbackPage <= 3) pg = i + 1;
-                                                                else if (playbackPage >= totalPlaybackPages - 2) pg = totalPlaybackPages - 4 + i;
-                                                                else pg = playbackPage - 2 + i;
-                                                                if (pg < 1 || pg > totalPlaybackPages) return null;
-                                                                return (
-                                                                    <button key={pg} onClick={() => setPlaybackPage(pg)}
-                                                                        className={`w-7 h-7 rounded-lg text-[11px] font-semibold transition-colors ${pg === playbackPage ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800'}`}>
-                                                                        {pg}
-                                                                    </button>
-                                                                );
-                                                            })}
-                                                            <button disabled={playbackPage >= totalPlaybackPages} onClick={() => setPlaybackPage(p => p + 1)}
-                                                                className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-30 transition-colors">
-                                                                <ChevronRight className="w-3.5 h-3.5" />
-                                                            </button>
-                                                        </div>
-                                                    )}
-                                                </>
-                                            )}
-                                        </div>
-                                    );
-                                })()}
-
-                                {/* Info Tab */}
-                                {activeDrawerTab === 'info' && (
-                                    <div className="space-y-3">
-                                        {[
-                                            { label: 'License ID', value: `#${drawerData.id}` },
-                                            { label: 'Repo URL', value: <button onClick={() => copyText(getRepoUrl(drawerData.license_key))} className="flex items-center gap-1 font-mono text-[11px] text-indigo-600 dark:text-indigo-400 break-all text-left">{getRepoUrl(drawerData.license_key)} <Copy className="w-3 h-3 opacity-50 shrink-0" /></button> },
-                                            { label: 'License Key', value: <button onClick={() => copyText(drawerData.license_key)} className="flex items-center gap-1 font-mono text-[11px] text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 break-all">{drawerData.license_key} <Copy className="w-3 h-3 opacity-50" /></button> },
-                                            { label: 'Name', value: drawerData.name || '—' },
-                                            { label: 'Max Devices', value: `${drawerData.max_devices}` },
-                                            { label: 'Created', value: formatWIB(drawerData.created_at) },
-                                            { label: 'Expires', value: formatWIB(drawerData.expires_at) },
-                                            { label: 'Note', value: drawerData.note || '—' },
-                                        ].map(r => (
-                                            <div key={r.label} className="flex items-start justify-between py-2 border-b border-slate-100 dark:border-slate-800 last:border-0">
-                                                <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{r.label}</span>
-                                                <span className="text-[12px] text-slate-700 dark:text-slate-300 text-right max-w-[55%] break-words">{r.value}</span>
-                                            </div>
-                                        ))}
-                                        {/* Actions */}
-                                        <div className="flex gap-2 flex-wrap pt-2">
-                                            {drawer.status === 'revoked'
-                                                ? <button onClick={() => setConfirm({ title: 'Activate', msg: 'Activate this license?', action: () => doAction(drawer.id, 'activate', 'Activated') })} className="btn-ghost text-emerald-600 text-[12px] py-1.5"><ShieldCheck className="w-3.5 h-3.5" /> Activate</button>
-                                                : <button onClick={() => setConfirm({ title: 'Revoke', msg: 'Revoke this license?', action: () => doAction(drawer.id, 'revoke', 'Revoked'), danger: true })} className="btn-ghost text-red-600 text-[12px] py-1.5"><ShieldOff className="w-3.5 h-3.5" /> Revoke</button>
-                                            }
-                                            <button onClick={() => setEditModal({ ...drawer })} className="btn-ghost text-[12px] py-1.5"><Pencil className="w-3.5 h-3.5" /> Edit</button>
-                                            <button onClick={() => setConfirm({ title: 'Delete', msg: 'Move to trash?', action: () => doDelete(drawer.id), danger: true })} className="btn-ghost text-red-600 text-[12px] py-1.5"><Trash2 className="w-3.5 h-3.5" /> Delete</button>
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        )}
-                    </div>
-                </>,
-                document.body
-            )}
+            <LicenseDrawer
+                drawer={drawer}
+                setDrawer={setDrawer}
+                setConfirm={setConfirm}
+                setEditModal={setEditModal}
+                openDrawer={openDrawer}
+                drawerLoading={drawerLoading}
+                drawerData={drawerData}
+            />
 
             {/* ══════════════════════════════════════
                 EDIT MODAL

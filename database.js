@@ -198,6 +198,19 @@ async function initDatabase() {
         created_at DATETIME DEFAULT (datetime('now'))
     )`);
 
+    db.run(`CREATE TABLE IF NOT EXISTS abuse_alerts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        alert_type TEXT NOT NULL,
+        license_key TEXT DEFAULT '',
+        device_id TEXT DEFAULT '',
+        device_name TEXT DEFAULT '',
+        ip_address TEXT DEFAULT '',
+        details TEXT DEFAULT '',
+        severity TEXT DEFAULT 'medium',
+        is_read INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT (datetime('now'))
+    )`);
+
     db.run(`CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -215,6 +228,9 @@ async function initDatabase() {
     db.run(`CREATE INDEX IF NOT EXISTS idx_access_logs_key ON access_logs(license_key)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_blocked_ips ON blocked_ips(ip_address)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_admin_logs_user ON admin_logs(admin_username)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_abuse_alerts_type ON abuse_alerts(alert_type)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_abuse_alerts_key ON abuse_alerts(license_key)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_abuse_alerts_read ON abuse_alerts(is_read)`);
 
     // --- DEFAULT ADMIN ---
     const adminCount = get('SELECT COUNT(*) as c FROM admins');
@@ -282,7 +298,7 @@ function createBulkLicenses({ count = 1, durationDays = 30, maxDevices = 2, note
     return keys;
 }
 
-function getLicensesPaginated(page = 1, limit = 20, search = '', status = '', trashed = false) {
+function getLicensesPaginated(page = 1, limit = 20, search = '', status = '', trashed = false, dateFrom = '') {
     const offset = (page - 1) * limit;
     let whereClauses = [];
     let params = [];
@@ -298,15 +314,42 @@ function getLicensesPaginated(page = 1, limit = 20, search = '', status = '', tr
         params.push(`%${search}%`, `%${search}%`, `%${search}%`);
     }
 
-    if (status) {
+    if (status === 'expiring_soon') {
+        // Licenses that are active and expire within the next 3 days
+        whereClauses.push("status = 'active' AND expires_at > datetime('now') AND expires_at <= datetime('now', '+3 days')");
+    } else if (status) {
         whereClauses.push('status = ?');
         params.push(status);
+    }
+
+    if (dateFrom) {
+        whereClauses.push('created_at >= ?');
+        params.push(dateFrom);
     }
 
     const where = whereClauses.length ? `WHERE ${whereClauses.join(' AND ')}` : '';
 
     const total = get(`SELECT COUNT(*) as c FROM licenses ${where}`, params);
     const rows = all(`SELECT * FROM licenses ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+
+    // Also get status counts for the stats bar
+    const baseClauses = ['deleted_at IS NULL'];
+    const baseParams = [];
+    if (search) {
+        baseClauses.push("(license_key LIKE ? OR name LIKE ? OR note LIKE ?)");
+        baseParams.push(`%${search}%`, `%${search}%`, `%${search}%`);
+    }
+    if (dateFrom) {
+        baseClauses.push('created_at >= ?');
+        baseParams.push(dateFrom);
+    }
+    const baseWhere = baseClauses.length ? `WHERE ${baseClauses.join(' AND ')}` : '';
+
+    const countAll = get(`SELECT COUNT(*) as c FROM licenses ${baseWhere}`, baseParams)?.c || 0;
+    const countActive = get(`SELECT COUNT(*) as c FROM licenses ${baseWhere} AND status = 'active' AND expires_at > datetime('now')`, baseParams)?.c || 0;
+    const countExpiringSoon = get(`SELECT COUNT(*) as c FROM licenses ${baseWhere} AND status = 'active' AND expires_at > datetime('now') AND expires_at <= datetime('now', '+3 days')`, baseParams)?.c || 0;
+    const countExpired = get(`SELECT COUNT(*) as c FROM licenses ${baseWhere} AND (status = 'expired' OR (status = 'active' AND expires_at <= datetime('now')))`, baseParams)?.c || 0;
+    const countRevoked = get(`SELECT COUNT(*) as c FROM licenses ${baseWhere} AND status = 'revoked'`, baseParams)?.c || 0;
 
     const now = new Date();
     // Attach device count and check expiration dynamically
@@ -320,7 +363,10 @@ function getLicensesPaginated(page = 1, limit = 20, search = '', status = '', tr
         }
     });
 
-    return { licenses: rows, total: total?.c || 0, page, limit };
+    return {
+        licenses: rows, total: total?.c || 0, page, limit,
+        counts: { all: countAll, active: countActive, expiring_soon: countExpiringSoon, expired: countExpired, revoked: countRevoked }
+    };
 }
 
 function getLicenseByKey(key) {
@@ -443,23 +489,85 @@ function getDeviceByDeviceId(licenseKey, deviceId) {
 // DEVICE MANAGEMENT
 // ============================================================
 
-function getDevicesPaginated(page = 1, limit = 20, search = '') {
+function getDevicesPaginated(page = 1, limit = 20, search = '', status = '') {
     const offset = (page - 1) * limit;
-    let where = '';
+    let whereClauses = [];
     let params = [];
     if (search) {
-        where = 'WHERE d.device_id LIKE ? OR d.device_name LIKE ? OR d.license_key LIKE ? OR d.ip_address LIKE ?';
-        params = [`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`];
+        whereClauses.push('(d.device_id LIKE ? OR d.device_name LIKE ? OR d.license_key LIKE ? OR d.ip_address LIKE ?)');
+        params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
     }
+
+    if (status === 'blocked') {
+        whereClauses.push('d.is_blocked = 1');
+    } else if (status === 'online') {
+        whereClauses.push("d.last_seen > datetime('now', '-30 minutes') AND d.is_blocked = 0");
+    } else if (status === 'offline') {
+        whereClauses.push("d.last_seen <= datetime('now', '-30 minutes') AND d.is_blocked = 0");
+    }
+
+    const where = whereClauses.length ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
     const total = get(`SELECT COUNT(*) as c FROM devices d ${where}`, params);
-    const rows = all(`SELECT d.*, l.name as license_name, 
+    const rows = all(`SELECT d.*, l.id as license_id, l.name as license_name, 
         CASE 
             WHEN l.status = 'active' AND l.expires_at <= datetime('now', 'localtime') THEN 'expired' 
             ELSE l.status 
         END as license_status,
         CASE WHEN d.last_seen > datetime('now', '-30 minutes') THEN 1 ELSE 0 END as is_online
-        FROM devices d LEFT JOIN licenses l ON d.license_key = l.license_key ${where} ORDER BY d.last_seen DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
-    return { devices: rows, total: total?.c || 0, page, limit };
+        FROM devices d LEFT JOIN licenses l ON d.license_key = l.license_key ${where} ORDER BY l.id DESC, d.last_seen DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+
+    if (rows.length > 0) {
+        const deviceIds = rows.map(r => r.device_id).filter(Boolean);
+        if (deviceIds.length > 0) {
+            const placeholders = deviceIds.map(() => '?').join(',');
+            const activityRows = all(`
+                SELECT device_id, date(played_at, 'localtime') as day, count(*) as c 
+                FROM playback_logs 
+                WHERE device_id IN (${placeholders})
+                AND played_at >= datetime('now', '-6 days', 'localtime')
+                GROUP BY device_id, day
+            `, deviceIds);
+
+            const days = Array.from({ length: 7 }, (_, i) => {
+                const d = new Date();
+                d.setDate(d.getDate() - (6 - i));
+                return d.toISOString().split('T')[0];
+            });
+
+            const actMap = {};
+            for (const row of activityRows) {
+                if (!actMap[row.device_id]) actMap[row.device_id] = {};
+                actMap[row.device_id][row.day] = row.c;
+            }
+
+            for (const dev of rows) {
+                dev.activity7d = days.map(day => ({
+                    day,
+                    count: actMap[dev.device_id]?.[day] || 0
+                }));
+            }
+        }
+    }
+
+    // Get status counts for the UI
+    const baseClauses = [];
+    const baseParams = [];
+    if (search) {
+        baseClauses.push('(d.device_id LIKE ? OR d.device_name LIKE ? OR d.license_key LIKE ? OR d.ip_address LIKE ?)');
+        baseParams.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+    }
+    const baseWhere = baseClauses.length ? `WHERE ${baseClauses.join(' AND ')}` : '';
+
+    const countAll = get(`SELECT COUNT(*) as c FROM devices d ${baseWhere}`, baseParams)?.c || 0;
+    const countOnline = get(`SELECT COUNT(*) as c FROM devices d ${baseWhere} ${baseWhere ? 'AND' : 'WHERE'} last_seen > datetime('now', '-30 minutes') AND is_blocked = 0`, baseParams)?.c || 0;
+    const countOffline = get(`SELECT COUNT(*) as c FROM devices d ${baseWhere} ${baseWhere ? 'AND' : 'WHERE'} last_seen <= datetime('now', '-30 minutes') AND is_blocked = 0`, baseParams)?.c || 0;
+    const countBlocked = get(`SELECT COUNT(*) as c FROM devices d ${baseWhere} ${baseWhere ? 'AND' : 'WHERE'} is_blocked = 1`, baseParams)?.c || 0;
+
+    return {
+        devices: rows, total: total?.c || 0, page, limit,
+        counts: { all: countAll, online: countOnline, offline: countOffline, blocked: countBlocked }
+    };
 }
 
 function blockDevice(id) {
@@ -468,6 +576,16 @@ function blockDevice(id) {
 
 function unblockDevice(id) {
     run('UPDATE devices SET is_blocked = 0 WHERE id = ?', [id]);
+}
+
+function getBlockedDevices() {
+    return all(`
+        SELECT d.*, l.name as license_name 
+        FROM devices d 
+        LEFT JOIN licenses l ON d.license_key = l.license_key 
+        WHERE d.is_blocked = 1 
+        ORDER BY d.last_seen DESC
+    `);
 }
 
 function deleteDevice(id) {
@@ -859,6 +977,176 @@ function cleanupOldLogs() {
 }
 
 // ============================================================
+// ABUSE DETECTION
+// ============================================================
+
+function createAbuseAlert(alertType, licenseKey, deviceId, ip, details, severity = 'medium') {
+    // Deduplicate: don't create the same alert twice within 30 minutes
+    const existing = get(
+        `SELECT id FROM abuse_alerts WHERE alert_type = ? AND license_key = ? AND device_id = ? AND created_at > datetime('now', '-30 minutes')`,
+        [alertType, licenseKey || '', deviceId || '']
+    );
+    if (existing) return null;
+
+    const deviceRecord = deviceId ? get('SELECT device_name FROM devices WHERE device_id = ? ORDER BY last_seen DESC LIMIT 1', [deviceId]) : null;
+    const deviceName = deviceRecord?.device_name || '';
+
+    run(
+        `INSERT INTO abuse_alerts (alert_type, license_key, device_id, device_name, ip_address, details, severity) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [alertType, licenseKey || '', deviceId || '', deviceName, ip || '', details, severity]
+    );
+    return true;
+}
+
+/**
+ * Run all abuse checks for a given request context. 
+ * Called AFTER successful validation (non-blocking).
+ */
+function runAbuseChecks(licenseKey, deviceId, ip) {
+    try {
+        // CHECK 1: Device Overflow Attempt
+        // When max_devices is reached and a NEW device tries to register
+        // This is already blocked by validateLicense, but we want to ALERT about the attempt
+        if (licenseKey) {
+            const lic = getLicenseByKey(licenseKey);
+            if (lic && lic.max_devices > 0) {
+                const countRow = get('SELECT COUNT(*) as c FROM devices WHERE license_key = ?', [licenseKey]);
+                const deviceCount = countRow?.c || 0;
+                // Check if there were recent VERIFY_FAIL with reason max_devices
+                const recentOverflow = get(
+                    `SELECT COUNT(*) as c FROM access_logs WHERE license_key = ? AND action = 'VERIFY_FAIL' AND details LIKE '%max_devices%' AND created_at > datetime('now', '-5 minutes')`,
+                    [licenseKey]
+                );
+                if (recentOverflow && recentOverflow.c >= 1) {
+                    createAbuseAlert(
+                        'DEVICE_OVERFLOW', licenseKey, deviceId, ip,
+                        `License limit ${lic.max_devices} devices, currently ${deviceCount} registered. New device attempted to connect.`,
+                        recentOverflow.c >= 3 ? 'high' : 'medium'
+                    );
+                }
+            }
+        }
+
+        // CHECK 2: IP Rotation — 1 device, 5+ distinct IPs in 1 minute
+        if (deviceId) {
+            const ipRotation = get(
+                `SELECT COUNT(DISTINCT ip_address) as c FROM access_logs WHERE device_id = ? AND created_at > datetime('now', '-1 minute')`,
+                [deviceId]
+            );
+            if (ipRotation && ipRotation.c >= 5) {
+                const recentIPs = all(
+                    `SELECT DISTINCT ip_address FROM access_logs WHERE device_id = ? AND created_at > datetime('now', '-1 minute') LIMIT 10`,
+                    [deviceId]
+                ).map(r => r.ip_address).join(', ');
+                createAbuseAlert(
+                    'IP_ROTATION', licenseKey, deviceId, ip,
+                    `Device used ${ipRotation.c} different IPs in last 1 minute: ${recentIPs}`,
+                    ipRotation.c >= 8 ? 'critical' : 'high'
+                );
+            }
+        }
+
+        // CHECK 3: Burst Request — 1 device, 30+ requests in 1 minute  
+        if (deviceId) {
+            const burst = get(
+                `SELECT COUNT(*) as c FROM access_logs WHERE device_id = ? AND created_at > datetime('now', '-1 minute')`,
+                [deviceId]
+            );
+            if (burst && burst.c >= 30) {
+                createAbuseAlert(
+                    'BURST_REQUEST', licenseKey, deviceId, ip,
+                    `Device sent ${burst.c} requests in last 1 minute. Possible bot/scraper activity.`,
+                    burst.c >= 60 ? 'critical' : 'high'
+                );
+            }
+        }
+
+        // CHECK 4: Multi-IP License — 1 license accessed from 10+ IPs in 5 minutes
+        if (licenseKey) {
+            const multiIp = get(
+                `SELECT COUNT(DISTINCT ip_address) as c FROM access_logs WHERE license_key = ? AND created_at > datetime('now', '-5 minutes')`,
+                [licenseKey]
+            );
+            if (multiIp && multiIp.c >= 10) {
+                const recentIPs = all(
+                    `SELECT DISTINCT ip_address FROM access_logs WHERE license_key = ? AND created_at > datetime('now', '-5 minutes') LIMIT 15`,
+                    [licenseKey]
+                ).map(r => r.ip_address).join(', ');
+                createAbuseAlert(
+                    'MULTI_IP_LICENSE', licenseKey, '', ip,
+                    `License accessed from ${multiIp.c} different IPs in 5 minutes: ${recentIPs}. Possible license sharing.`,
+                    multiIp.c >= 15 ? 'critical' : 'high'
+                );
+            }
+        }
+
+        // CHECK 5: Device Spoofing — Same device_id, same device_name, but many different IPs
+        // This catches someone who cloned the device_id and is running it on many different machines
+        if (deviceId) {
+            const spoofCheck = get(
+                `SELECT COUNT(DISTINCT ip_address) as c FROM access_logs WHERE device_id = ? AND created_at > datetime('now', '-10 minutes')`,
+                [deviceId]
+            );
+            if (spoofCheck && spoofCheck.c >= 4) {
+                // Also check if IPRange is dramatically different (not just carrier switching)
+                const recentIPs = all(
+                    `SELECT DISTINCT ip_address FROM access_logs WHERE device_id = ? AND created_at > datetime('now', '-10 minutes') LIMIT 10`,
+                    [deviceId]
+                ).map(r => r.ip_address);
+
+                // Check if the IPs have different /24 subnets (strong indicator of spoofing vs mobile network)
+                const subnets = new Set(recentIPs.map(ip => ip.split('.').slice(0, 3).join('.')));
+                if (subnets.size >= 3) {
+                    createAbuseAlert(
+                        'DEVICE_SPOOF', licenseKey, deviceId, ip,
+                        `Device ID accessed from ${spoofCheck.c} different IPs across ${subnets.size} different subnets in 10 minutes. IPs: ${recentIPs.join(', ')}. Possible device_id cloning/spoofing.`,
+                        subnets.size >= 5 ? 'critical' : 'high'
+                    );
+                }
+            }
+        }
+    } catch (e) {
+        console.error('[ABUSE] Detection error:', e.message);
+    }
+}
+
+function getAbuseAlertsPaginated(page = 1, limit = 20, alertType = '', isRead = '') {
+    const offset = (page - 1) * limit;
+    let where = [];
+    let params = [];
+
+    if (alertType) {
+        where.push('alert_type = ?');
+        params.push(alertType);
+    }
+    if (isRead !== '') {
+        where.push('is_read = ?');
+        params.push(parseInt(isRead));
+    }
+
+    const whereStr = where.length > 0 ? 'WHERE ' + where.join(' AND ') : '';
+    const total = get(`SELECT COUNT(*) as c FROM abuse_alerts ${whereStr}`, params)?.c || 0;
+    const alerts = all(
+        `SELECT * FROM abuse_alerts ${whereStr} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+        [...params, limit, offset]
+    );
+
+    return { alerts, total, page, totalPages: Math.ceil(total / limit) };
+}
+
+function markAlertRead(id) {
+    run('UPDATE abuse_alerts SET is_read = 1 WHERE id = ?', [id]);
+}
+
+function markAllAlertsRead() {
+    run('UPDATE abuse_alerts SET is_read = 1 WHERE is_read = 0');
+}
+
+function getUnreadAlertCount() {
+    return get('SELECT COUNT(*) as c FROM abuse_alerts WHERE is_read = 0')?.c || 0;
+}
+
+// ============================================================
 // EXPORTS
 // ============================================================
 
@@ -878,7 +1166,7 @@ module.exports = {
     // Device lookup (read-only, no create)
     getDeviceByDeviceId,
     // Devices
-    getDevicesPaginated, blockDevice, unblockDevice, deleteDevice, renameDevice, replaceTemporaryDevice,
+    getDevicesPaginated, blockDevice, unblockDevice, getBlockedDevices, deleteDevice, renameDevice, replaceTemporaryDevice,
     // Device Tokens (URL-based per-device access)
     createDeviceToken, getDeviceTokensByLicense, getDeviceToken,
     validateDeviceToken, blockDeviceToken, unblockDeviceToken,
@@ -901,5 +1189,8 @@ module.exports = {
     // Repositories
     getRepositories, addRepository, deleteRepository,
     // Log cleanup
-    cleanupOldLogs
+    cleanupOldLogs,
+    // Abuse Detection
+    runAbuseChecks, createAbuseAlert, getAbuseAlertsPaginated,
+    markAlertRead, markAllAlertsRead, getUnreadAlertCount
 };

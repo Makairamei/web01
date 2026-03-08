@@ -507,6 +507,9 @@ app.post('/api/verify_activity', rateLimit(60000, 120), (req, res) => {
         }
 
         res.json({ status: 'active', message: 'Valid', days_left: result.daysLeft });
+
+        // Run abuse checks asynchronously (non-blocking)
+        setImmediate(() => db.runAbuseChecks(key, deviceId, ip));
     } catch (e) {
         console.error('Verify activity error:', e.message);
         res.status(500).json({ status: 'error', message: 'Server error' });
@@ -947,11 +950,24 @@ app.get('/api/admin/licenses', authMiddleware, (req, res) => {
         const search = cleanInput(req.query.search || '');
         const status = cleanInput(req.query.status || '');
         const trashed = req.query.trashed === 'true';
+        const dateFrom = cleanInput(req.query.date_from || '');
 
-        const result = db.getLicensesPaginated(page, limit, search, status, trashed);
+        const result = db.getLicensesPaginated(page, limit, search, status, trashed, dateFrom);
         res.json({ status: 'ok', ...result });
     } catch (e) {
         console.error('List licenses error:', e.message);
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+// Look up license by key (for device → license navigation)
+app.get('/api/admin/licenses/by-key/:key', authMiddleware, (req, res) => {
+    try {
+        const lic = db.getLicenseByKey(req.params.key);
+        if (!lic) return res.status(404).json({ status: 'error', message: 'License not found' });
+        res.json({ status: 'ok', id: lic.id, license_key: lic.license_key, name: lic.name, status: lic.status });
+    } catch (e) {
+        console.error('License by key error:', e.message);
         res.status(500).json({ status: 'error', message: 'Server error' });
     }
 });
@@ -1069,11 +1085,48 @@ app.get('/api/admin/devices', authMiddleware, (req, res) => {
         const page = parseInt(req.query.page) || 1;
         const limit = Math.min(parseInt(req.query.limit) || 20, 100);
         const search = cleanInput(req.query.search || '');
+        const status = cleanInput(req.query.status || '');
 
-        const result = db.getDevicesPaginated(page, limit, search);
+        const result = db.getDevicesPaginated(page, limit, search, status);
         res.json({ status: 'ok', ...result });
     } catch (e) {
         console.error('List devices error:', e.message);
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+app.put('/api/admin/devices/bulk', authMiddleware, (req, res) => {
+    try {
+        const { ids, action } = req.body;
+        const ip = getClientIP(req);
+
+        if (!Array.isArray(ids) || !ids.length || !action) {
+            return res.status(400).json({ status: 'error', message: 'ids array and action required' });
+        }
+        const validActions = ['block', 'unblock', 'delete'];
+        if (!validActions.includes(action)) {
+            return res.status(400).json({ status: 'error', message: 'Invalid action' });
+        }
+
+        let processed = 0;
+        for (const id of ids.slice(0, 500)) {
+            const numId = parseInt(id);
+            if (isNaN(numId)) continue;
+
+            if (action === 'delete') {
+                db.deleteDevice(numId);
+            } else if (action === 'block') {
+                db.blockDevice(numId);
+            } else if (action === 'unblock') {
+                db.unblockDevice(numId);
+            }
+            processed++;
+        }
+
+        db.logAdminAction(req.admin.username, `BULK_DEVICE_${action.toUpperCase()}`, `Processed ${processed} devices.\n\nAffected Device IDs: ${ids.join(', ')}`, ip);
+        res.json({ status: 'ok', processed });
+    } catch (e) {
+        console.error('Bulk device action error:', e.message);
         res.status(500).json({ status: 'error', message: 'Server error' });
     }
 });
@@ -1084,17 +1137,12 @@ app.put('/api/admin/devices/:id', authMiddleware, (req, res) => {
         const { action, name } = req.body;
         const ip = getClientIP(req);
 
-        // Fetch device record first so we can clear the right IP session
-        const dev = db.get ? db.get('SELECT * FROM devices WHERE id = ?', [id]) : null;
-
         if (action === 'block') {
             db.blockDevice(id);
-            if (dev) clearIPSessionsForTarget(dev.license_key);
             db.logAccess('', 'DEVICE_BLOCK', ip, `device_id:${id} by ${req.admin.username}`);
             db.logAdminAction(req.admin.username, 'BLOCK_DEVICE', `Blocked device ID: ${id}`, ip);
         } else if (action === 'unblock') {
             db.unblockDevice(id);
-            if (dev) clearIPSessionsForTarget(dev.license_key);
             db.logAccess('', 'DEVICE_UNBLOCK', ip, `device_id:${id} by ${req.admin.username}`);
             db.logAdminAction(req.admin.username, 'UNBLOCK_DEVICE', `Unblocked device ID: ${id}`, ip);
         } else if (action === 'rename') {
@@ -1102,7 +1150,6 @@ app.put('/api/admin/devices/:id', authMiddleware, (req, res) => {
             db.logAdminAction(req.admin.username, 'RENAME_DEVICE', `Renamed device ID: ${id} to ${name}`, ip);
         } else if (action === 'delete') {
             db.deleteDevice(id);
-            if (dev) clearIPSessionsForTarget(dev.license_key);
             db.logAccess('', 'DEVICE_DELETE', ip, `device_id:${id} by ${req.admin.username}`);
             db.logAdminAction(req.admin.username, 'DELETE_DEVICE', `Deleted device ID: ${id}`, ip);
         }
@@ -1118,9 +1165,7 @@ app.delete('/api/admin/devices/:id', authMiddleware, (req, res) => {
     try {
         const id = parseInt(req.params.id);
         const ip = getClientIP(req);
-        const dev = db.get ? db.get('SELECT * FROM devices WHERE id = ?', [id]) : null;
         db.deleteDevice(id);
-        if (dev) clearIPSessionsForTarget(dev.license_key);
         db.logAccess('', 'DEVICE_DELETE', ip, `device_id:${id} by ${req.admin.username}`);
         db.logAdminAction(req.admin.username, 'DELETE_DEVICE', `Deleted device ID: ${id}`, ip);
         res.json({ status: 'ok' });
@@ -1361,7 +1406,9 @@ app.get('/api/admin/analytics/sales', authMiddleware, (req, res) => {
 // Plugin breakdown statistics
 app.get('/api/admin/analytics/plugins', authMiddleware, (req, res) => {
     try {
-        const days = Math.min(parseInt(req.query.days) || 7, 90);
+        const daysParam = req.query.days;
+        const isAll = daysParam === 'all';
+        const days = isAll ? 36500 : Math.min(parseInt(daysParam) || 7, 365);
 
         // Usage by plugin
         const byPlugin = db.all(
@@ -1539,6 +1586,68 @@ app.post('/api/admin/security/unblock-ip', authMiddleware, (req, res) => {
         db.unblockIP(ip);
         db.logAccess('', 'IP_UNBLOCK', getClientIP(req), `unblocked ${ip} by ${req.admin.username}`);
         res.json({ status: 'ok' });
+    } catch (e) {
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+app.post('/api/admin/security/unblock-ips-bulk', authMiddleware, (req, res) => {
+    try {
+        const { ips } = req.body;
+        if (!Array.isArray(ips) || !ips.length) {
+            return res.status(400).json({ status: 'error', message: 'ips array required' });
+        }
+        let processed = 0;
+        for (const ip of ips.slice(0, 100)) {
+            if (typeof ip === 'string') {
+                db.unblockIP(ip);
+                processed++;
+            }
+        }
+        db.logAccess('', 'BULK_IP_UNBLOCK', getClientIP(req), `${processed} IPs unblocked by ${req.admin.username}`);
+        res.json({ status: 'ok', processed });
+    } catch (e) {
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+app.get('/api/admin/security/blocked-devices', authMiddleware, (req, res) => {
+    try {
+        const blockedDevices = db.getBlockedDevices ? db.getBlockedDevices() : [];
+        res.json({ status: 'ok', blocked_devices: blockedDevices });
+    } catch (e) {
+        console.error('Blocked devices error:', e.message);
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+app.post('/api/admin/security/block-license', authMiddleware, (req, res) => {
+    try {
+        const { license_key } = req.body;
+        if (!license_key) return res.status(400).json({ status: 'error', message: 'License key required' });
+
+        const lic = db.getLicenseByKey(license_key);
+        if (!lic) return res.status(404).json({ status: 'error', message: 'License not found' });
+
+        db.updateLicenseStatus(lic.id, 'revoked');
+        db.logAdminAction(req.admin.username, 'BLOCK_LICENSE', `Blocked license key: ${license_key}`, getClientIP(req));
+        res.json({ status: 'ok', message: 'License blocked successfully' });
+    } catch (e) {
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+app.post('/api/admin/security/block-device', authMiddleware, (req, res) => {
+    try {
+        const { device_id } = req.body;
+        if (!device_id) return res.status(400).json({ status: 'error', message: 'Device ID required' });
+
+        const device = db.get('SELECT id FROM devices WHERE device_id = ? ORDER BY last_seen DESC LIMIT 1', [device_id]);
+        if (!device) return res.status(404).json({ status: 'error', message: 'Device not found' });
+
+        db.blockDevice(device.id);
+        db.logAdminAction(req.admin.username, 'BLOCK_DEVICE', `Blocked device ID: ${device_id}`, getClientIP(req));
+        res.json({ status: 'ok', message: 'Device blocked successfully' });
     } catch (e) {
         res.status(500).json({ status: 'error', message: 'Server error' });
     }
@@ -1768,6 +1877,72 @@ app.post('/api/admin/repos/validate', authMiddleware, async (req, res) => {
 
     } catch (e) {
         res.status(400).json({ status: 'error', message: 'Validation failed: ' + e.message });
+    }
+});
+
+app.get('/api/admin/backup', authMiddleware, (req, res) => {
+    try {
+        const dbPath = path.join(__dirname, 'database.sqlite');
+        const fileName = `cs-premium-backup-${new Date().toISOString().split('T')[0]}.sqlite`;
+
+        db.logAdminAction(req.admin.username, 'DOWNLOAD_BACKUP', 'Downloaded database backup', getClientIP(req));
+
+        res.download(dbPath, fileName, (err) => {
+            if (err) {
+                console.error('Backup download error:', err.message);
+                if (!res.headersSent) res.status(500).json({ status: 'error', message: 'Failed to download backup' });
+            }
+        });
+    } catch (e) {
+        console.error('Backup error:', e.message);
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+// ============================================================
+// ADMIN — Abuse Detection Alerts
+// ============================================================
+
+app.get('/api/admin/abuse-alerts', authMiddleware, (req, res) => {
+    try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+        const alertType = cleanInput(req.query.type || '');
+        const isRead = req.query.is_read !== undefined ? req.query.is_read : '';
+
+        const result = db.getAbuseAlertsPaginated(page, limit, alertType, isRead);
+        res.json({ status: 'ok', ...result });
+    } catch (e) {
+        console.error('Abuse alerts error:', e.message);
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+app.get('/api/admin/abuse-alerts/count', authMiddleware, (req, res) => {
+    try {
+        const count = db.getUnreadAlertCount();
+        res.json({ status: 'ok', count });
+    } catch (e) {
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+app.put('/api/admin/abuse-alerts/:id/read', authMiddleware, (req, res) => {
+    try {
+        db.markAlertRead(req.params.id);
+        res.json({ status: 'ok' });
+    } catch (e) {
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+app.put('/api/admin/abuse-alerts/read-all', authMiddleware, (req, res) => {
+    try {
+        db.markAllAlertsRead();
+        db.logAdminAction(req.admin.username, 'MARK_ALL_ALERTS_READ', 'Marked all abuse alerts as read', getClientIP(req));
+        res.json({ status: 'ok' });
+    } catch (e) {
+        res.status(500).json({ status: 'error', message: 'Server error' });
     }
 });
 

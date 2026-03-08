@@ -1,12 +1,16 @@
-import { useState, useCallback } from 'react';
-import { get, put, del, formatWIB, timeAgo } from '../lib/api';
+import { useState, useCallback, Fragment } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { get, put, del, formatWIB } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useToast } from '../components/Toast';
 import ConfirmModal from '../components/ConfirmModal';
 import {
     Search, ChevronLeft, ChevronRight, RefreshCw, X,
-    Monitor, ShieldOff, ShieldCheck, Trash2, Clock, Globe, Activity, Eye
+    Monitor, ShieldOff, ShieldCheck, Trash2, Clock, Globe, Activity, Eye,
+    CheckSquare, Square, Check
 } from 'lucide-react';
+import { AreaChart, Area } from 'recharts';
+import LicenseDrawer from '../components/LicenseDrawer';
 import { cleanPluginName } from '../lib/api';
 
 const LIMIT = 10;
@@ -14,36 +18,77 @@ const LIMIT = 10;
 
 export default function Devices() {
     const toast = useToast();
+    const navigate = useNavigate();
     const [page, setPage] = useState(1);
     const [search, setSearch] = useState('');
     const [searchInput, setSearchInput] = useState('');
+    const [statusFilter, setStatusFilter] = useState('');
     const [drawer, setDrawer] = useState(null);
     const [drawerData, setDrawerData] = useState(null);
     const [drawerLoading, setDrawerLoading] = useState(false);
+    const [editModal, setEditModal] = useState(null);
     const [confirm, setConfirm] = useState(null);
+    const [selected, setSelected] = useState(new Set());
 
     const { data, loading, refetch } = useApi(
-        `/admin/devices?page=${page}&limit=${LIMIT}&search=${encodeURIComponent(search)}`,
-        [page, search]
+        `/admin/devices?page=${page}&limit=${LIMIT}&search=${encodeURIComponent(search)}&status=${statusFilter}`,
+        [page, search, statusFilter]
     );
 
     const devices = data?.devices || [];
     const total = data?.total || 0;
     const totalPages = Math.ceil(total / LIMIT);
+    const counts = data?.counts || { all: 0, online: 0, offline: 0, blocked: 0 };
 
-    /* ── open device drawer ── */
-    const openDrawer = useCallback(async (dev) => {
-        setDrawer(dev);
+    /* ── bulk actions ── */
+    const toggleSelect = (id) => {
+        const next = new Set(selected);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        setSelected(next);
+    };
+
+    const toggleAll = () => {
+        if (selected.size === devices.length && devices.length > 0) {
+            setSelected(new Set());
+        } else {
+            setSelected(new Set(devices.map(d => d.id)));
+        }
+    };
+    const allSelected = devices.length > 0 && selected.size === devices.length;
+
+    const doBulk = useCallback(async (action) => {
+        try {
+            await put('/admin/devices/bulk', { ids: Array.from(selected), action });
+            toast(`Action ${action} successful`, 'success');
+            setSelected(new Set());
+            refetch();
+        } catch { toast('Bulk action failed', 'error'); }
+    }, [selected, toast, refetch]);
+
+    /* ── open license drawer ── */
+    const openDrawer = useCallback(async (devOrLic) => {
+        // Since we want to open the *license* detail, and we have device row
+        // we can construct a fake license object or fetch it if needed.
+        // Actually, it's better to fetch by license id directly or let the drawer do it.
+        // The drawer expects a license object with at least id, license_key.
+        const lic = {
+            id: devOrLic.license_id || devOrLic.id,
+            license_key: devOrLic.license_key,
+            name: devOrLic.license_name,
+            status: devOrLic.license_status || 'active',
+            expires_at: devOrLic.expires_at || null
+        };
+
+        setDrawer(lic);
         setDrawerData(null);
         setDrawerLoading(true);
         try {
-            // Get device activity from plugin_usage and playback_logs
-            const acts = await get(`/admin/plugin-usage?search=${encodeURIComponent(dev.device_id)}&limit=30`);
-            const plays = await get(`/admin/playback-logs?search=${encodeURIComponent(dev.device_id)}&limit=20`);
-            setDrawerData({ activities: acts?.logs || [], playbacks: plays?.logs || [] });
-        } catch { setDrawerData({ activities: [], playbacks: [] }); }
+            const d = await get(`/admin/licenses/${lic.id}/details`);
+            setDrawerData(d);
+        } catch { toast('Could not load license details', 'error'); }
         finally { setDrawerLoading(false); }
-    }, []);
+    }, [toast]);
 
     /* ── actions ── */
     const doAction = useCallback(async (id, action, msg) => {
@@ -70,9 +115,20 @@ export default function Devices() {
         setPage(1);
     };
 
-    /* ── device number within license ── */
-    // Add a display number: count position within the filtered list (across pages it'll just be sequential)
-    const deviceNumber = (index) => (page - 1) * LIMIT + index + 1;
+    /* ── group devices ── */
+    const groupedDevices = devices.reduce((acc, d) => {
+        const lid = d.license_id || 'unknown';
+        if (!acc[lid]) acc[lid] = {
+            id: d.license_id,
+            key: d.license_key,
+            name: d.license_name,
+            status: d.license_status,
+            expires_at: d.expires_at,
+            devices: []
+        };
+        acc[lid].devices.push(d);
+        return acc;
+    }, {});
 
     return (
         <div className="space-y-4">
@@ -94,17 +150,59 @@ export default function Devices() {
                 </button>
             </div>
 
+            {/* Status Filters */}
+            <div className="flex items-center gap-2 overflow-x-auto custom-scroll pb-1">
+                {[
+                    { key: '', label: 'All', color: 'slate' },
+                    { key: 'online', label: 'Online', color: 'emerald' },
+                    { key: 'offline', label: 'Offline', color: 'amber' },
+                    { key: 'blocked', label: 'Blocked', color: 'red' }
+                ].map(s => {
+                    const isActive = statusFilter === s.key;
+                    const count = s.key === '' ? counts.all : counts[s.key];
+                    const colorMap = {
+                        slate: isActive ? 'bg-slate-700 text-white dark:bg-slate-200 dark:text-slate-900' : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700',
+                        emerald: isActive ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-500/10 dark:text-emerald-400 dark:hover:bg-emerald-500/20',
+                        amber: isActive ? 'bg-amber-500 text-white' : 'bg-amber-50 text-amber-700 hover:bg-amber-100 dark:bg-amber-500/10 dark:text-amber-400 dark:hover:bg-amber-500/20',
+                        red: isActive ? 'bg-red-600 text-white' : 'bg-red-50 text-red-700 hover:bg-red-100 dark:bg-red-500/10 dark:text-red-400 dark:hover:bg-red-500/20'
+                    };
+                    return (
+                        <button key={s.key} onClick={() => { setStatusFilter(s.key); setPage(1); setSelected(new Set()); }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-all duration-200 whitespace-nowrap ${colorMap[s.color]}`}>
+                            {s.label}
+                            {count !== undefined && <span className={`ml-0.5 text-[10px] font-bold ${isActive ? 'opacity-80' : 'opacity-60'}`}>{count}</span>}
+                        </button>
+                    );
+                })}
+            </div>
+
+            {/* Bulk action bar */}
+            {selected.size > 0 && (
+                <div className="flex items-center gap-2 px-4 py-2.5 bg-indigo-50 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/20 rounded-xl text-[12px] font-medium text-indigo-700 dark:text-indigo-300 fade-in">
+                    <Check className="w-3.5 h-3.5" />
+                    <span>{selected.size} selected</span>
+                    <div className="flex-1" />
+                    <button onClick={() => setConfirm({ title: 'Unblock Selected', msg: `Unblock ${selected.size} device(s)?`, action: () => doBulk('unblock') })} className="px-3 py-1 rounded-lg bg-emerald-500 text-white hover:bg-emerald-600">Unblock</button>
+                    <button onClick={() => setConfirm({ title: 'Block Selected', msg: `Block ${selected.size} device(s)?`, action: () => doBulk('block'), danger: true })} className="px-3 py-1 rounded-lg bg-red-500 text-white hover:bg-red-600">Block</button>
+                    <button onClick={() => setConfirm({ title: 'Remove Selected', msg: `Remove ${selected.size} device(s)?`, action: () => doBulk('delete'), danger: true })} className="px-3 py-1 rounded-lg bg-slate-500 text-white hover:bg-slate-600">Remove</button>
+                    <button onClick={() => setSelected(new Set())} className="p-1 rounded-lg hover:bg-indigo-100 dark:hover:bg-indigo-500/20"><X className="w-3.5 h-3.5" /></button>
+                </div>
+            )}
+
             {/* Table */}
             <div className="glass-card overflow-hidden">
                 <div className="table-responsive-wrap">
                     <table className="data-table">
                         <thead>
                             <tr>
-                                <th className="w-10">#</th>
+                                <th className="w-8">
+                                    <button onClick={toggleAll} className="text-slate-400 hover:text-slate-600">
+                                        {allSelected ? <CheckSquare className="w-4 h-4 text-indigo-600" /> : <Square className="w-4 h-4" />}
+                                    </button>
+                                </th>
                                 <th>Device</th>
-                                <th>License</th>
                                 <th className="hide-mobile">IP Address</th>
                                 <th>Status</th>
+                                <th className="hide-mobile">Activity (7d)</th>
                                 <th className="hide-mobile">Last Seen</th>
                                 <th>Actions</th>
                             </tr>
@@ -114,59 +212,86 @@ export default function Devices() {
                                 [...Array(LIMIT)].map((_, i) => (
                                     <tr key={i}>{[...Array(7)].map((_, j) => <td key={j}><div className="skeleton h-4 rounded w-20" /></td>)}</tr>
                                 ))
-                            ) : devices.length === 0 ? (
+                            ) : Object.keys(groupedDevices).length === 0 ? (
                                 <tr><td colSpan={7} className="py-16 text-center text-[13px] text-slate-400">No devices found</td></tr>
-                            ) : devices.map((d, idx) => (
-                                <tr key={d.id}>
-                                    <td>
-                                        <div className="w-7 h-7 rounded-lg bg-indigo-100 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-400 flex items-center justify-center text-[11px] font-bold">
-                                            {deviceNumber(idx)}
-                                        </div>
-                                    </td>
-                                    <td>
-                                        <div className="flex flex-col gap-0.5">
-                                            <span className="text-[13px] font-semibold text-slate-800 dark:text-slate-200">
-                                                {d.device_name || `Device ${deviceNumber(idx)}`}
-                                            </span>
-                                            <span className="font-mono text-[10px] text-slate-400">{d.device_id?.substring(0, 18)}…</span>
-                                        </div>
-                                    </td>
-                                    <td>
-                                        <div className="flex flex-col gap-0.5">
-                                            {d.license_name && <span className="text-[12px] font-medium text-slate-700 dark:text-slate-300">{d.license_name}</span>}
-                                            <span className="font-mono text-[10px] text-slate-400">{d.license_key?.substring(0, 16)}…</span>
-                                        </div>
-                                    </td>
-                                    <td className="hide-mobile font-mono text-[11px] text-slate-500">{d.ip_address || '—'}</td>
-                                    <td>
-                                        {d.is_blocked
-                                            ? <span className="badge badge-blocked">Blocked</span>
-                                            : d.is_online
-                                                ? <span className="badge badge-active">Online</span>
-                                                : <span className="badge badge-expired">Offline</span>
-                                        }
-                                    </td>
-                                    <td className="hide-mobile">
-                                        <div className="flex items-center gap-1 text-[11px] text-slate-400">
-                                            <Clock className="w-3 h-3" />
-                                            {timeAgo(d.last_seen)}
-                                        </div>
-                                    </td>
-                                    <td>
-                                        <div className="flex items-center gap-1">
-                                            <button onClick={() => openDrawer(d)} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-400 hover:text-indigo-600" title="View activity">
-                                                <Eye className="w-3.5 h-3.5" />
-                                            </button>
-                                            {d.is_blocked
-                                                ? <button onClick={() => setConfirm({ title: 'Unblock Device', msg: `Unblock this device?`, action: () => doAction(d.id, 'unblock', 'Device unblocked') })} className="p-1.5 rounded-lg hover:bg-emerald-50 dark:hover:bg-emerald-500/10 text-emerald-500" title="Unblock"><ShieldCheck className="w-3.5 h-3.5" /></button>
-                                                : <button onClick={() => setConfirm({ title: 'Block Device', msg: 'Block this device? It will not be able to use any license.', action: () => doAction(d.id, 'block', 'Device blocked'), danger: true })} className="p-1.5 rounded-lg hover:bg-amber-50 dark:hover:bg-amber-500/10 text-amber-500" title="Block"><ShieldOff className="w-3.5 h-3.5" /></button>
-                                            }
-                                            <button onClick={() => setConfirm({ title: 'Remove Device', msg: 'Remove this device? The license slot will be freed.', action: () => doDelete(d.id), danger: true })} className="p-1.5 rounded-lg hover:bg-red-50 dark:hover:bg-red-500/10 text-slate-400 hover:text-red-600" title="Delete">
-                                                <Trash2 className="w-3.5 h-3.5" />
-                                            </button>
-                                        </div>
-                                    </td>
-                                </tr>
+                            ) : Object.values(groupedDevices).map((group) => (
+                                <Fragment key={`group-${group.id}`}>
+                                    {/* Group Header */}
+                                    <tr className="bg-slate-50/80 dark:bg-slate-800/40 border-y border-slate-100 dark:border-slate-800">
+                                        <td colSpan={7} className="py-2.5 px-4">
+                                            <div className="flex items-center gap-3">
+                                                <div className="w-6 h-6 rounded-md bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
+                                                    <Globe className="w-3.5 h-3.5" />
+                                                </div>
+                                                <div className="flex items-center gap-1.5 flex-wrap">
+                                                    <span className="text-[12px] font-semibold text-slate-600 dark:text-slate-300">
+                                                        {group.name || 'Unnamed License'}
+                                                    </span>
+                                                    <span className="text-slate-300 dark:text-slate-600 mx-1">•</span>
+                                                    <button onClick={() => navigate(`/licenses?search=${encodeURIComponent(group.key)}`)} className="font-mono text-[11px] text-indigo-500 hover:text-indigo-600 hover:underline">
+                                                        {group.key}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                    {/* Devices in group */}
+                                    {group.devices.map(d => (
+                                        <tr key={d.id} className={selected.has(d.id) ? 'bg-indigo-50/40 dark:bg-indigo-500/10' : ''}>
+                                            <td>
+                                                <button onClick={() => toggleSelect(d.id)} className="text-slate-400 hover:text-slate-600">
+                                                    {selected.has(d.id) ? <CheckSquare className="w-4 h-4 text-indigo-600" /> : <Square className="w-4 h-4" />}
+                                                </button>
+                                            </td>
+                                            <td>
+                                                <div className="flex flex-col gap-0.5">
+                                                    <button onClick={() => openDrawer(d)} className="text-[13px] font-semibold text-slate-800 dark:text-slate-200 hover:text-indigo-600 hover:underline text-left">
+                                                        {d.device_name || 'Unnamed Device'}
+                                                    </button>
+                                                    <span className="font-mono text-[10px] text-slate-400">{d.device_id?.substring(0, 18)}…</span>
+                                                </div>
+                                            </td>
+                                            <td className="hide-mobile font-mono text-[11px] text-slate-500">{d.ip_address || '—'}</td>
+                                            <td>
+                                                {d.is_blocked
+                                                    ? <span className="badge badge-blocked">Blocked</span>
+                                                    : d.is_online
+                                                        ? <span className="badge badge-active">Online</span>
+                                                        : <span className="badge badge-expired">Offline</span>
+                                                }
+                                            </td>
+                                            <td className="hide-mobile w-20">
+                                                {d.activity7d && d.activity7d.some(a => a.count > 0) ? (
+                                                    <div className="w-[60px] h-[24px]">
+                                                        <AreaChart width={60} height={24} data={d.activity7d} margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
+                                                            <Area type="monotone" dataKey="count" stroke="#6366f1" fill="#c7d2fe" isAnimationActive={false} />
+                                                        </AreaChart>
+                                                    </div>
+                                                ) : <span className="text-[10px] text-slate-400">—</span>}
+                                            </td>
+                                            <td className="hide-mobile">
+                                                <div className="flex items-center gap-1 text-[11px] text-slate-500 dark:text-slate-400">
+                                                    <Clock className="w-3 h-3 shrink-0" />
+                                                    {formatWIB(d.last_seen)}
+                                                </div>
+                                            </td>
+                                            <td>
+                                                <div className="flex items-center gap-1">
+                                                    <button onClick={() => openDrawer(d)} className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-400 hover:text-indigo-600" title="View License details">
+                                                        <Eye className="w-3.5 h-3.5" />
+                                                    </button>
+                                                    {d.is_blocked
+                                                        ? <button onClick={() => setConfirm({ title: 'Unblock Device', msg: `Unblock this device?`, action: () => doAction(d.id, 'unblock', 'Device unblocked') })} className="p-1.5 rounded-lg hover:bg-emerald-50 dark:hover:bg-emerald-500/10 text-emerald-500" title="Unblock"><ShieldCheck className="w-3.5 h-3.5" /></button>
+                                                        : <button onClick={() => setConfirm({ title: 'Block Device', msg: 'Block this device? It will not be able to use any license.', action: () => doAction(d.id, 'block', 'Device blocked'), danger: true })} className="p-1.5 rounded-lg hover:bg-amber-50 dark:hover:bg-amber-500/10 text-amber-500" title="Block"><ShieldOff className="w-3.5 h-3.5" /></button>
+                                                    }
+                                                    <button onClick={() => setConfirm({ title: 'Remove Device', msg: 'Remove this device? The license slot will be freed.', action: () => doDelete(d.id), danger: true })} className="p-1.5 rounded-lg hover:bg-red-50 dark:hover:bg-red-500/10 text-slate-400 hover:text-red-600" title="Delete">
+                                                        <Trash2 className="w-3.5 h-3.5" />
+                                                    </button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </Fragment>
                             ))}
                         </tbody>
                     </table>
@@ -193,93 +318,16 @@ export default function Devices() {
                 </div>
             </div>
 
-            {/* ══ Device Detail Drawer ══ */}
-            {drawer && (
-                <>
-                    <div className="drawer-overlay" onClick={() => setDrawer(null)} />
-                    <div className="drawer-panel">
-                        {/* Header */}
-                        <div className="p-5 border-b border-slate-100 dark:border-slate-800">
-                            <div className="flex items-start justify-between">
-                                <div className="flex items-center gap-3">
-                                    <div className="w-10 h-10 rounded-xl bg-indigo-100 dark:bg-indigo-500/20 flex items-center justify-center">
-                                        <Monitor className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
-                                    </div>
-                                    <div>
-                                        <div className="text-[14px] font-bold text-slate-900 dark:text-white">
-                                            {drawer.device_name || 'Unnamed Device'}
-                                        </div>
-                                        <div className="font-mono text-[10px] text-slate-400 mt-0.5">{drawer.device_id}</div>
-                                    </div>
-                                </div>
-                                <button onClick={() => setDrawer(null)} className="p-1.5 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400">
-                                    <X className="w-4 h-4" />
-                                </button>
-                            </div>
-                            {/* Device Meta */}
-                            <div className="mt-3 grid grid-cols-2 gap-3 text-[11px]">
-                                {[
-                                    { icon: Globe, label: 'IP Address', val: drawer.ip_address || '—' },
-                                    { icon: Clock, label: 'Last Seen', val: timeAgo(drawer.last_seen) },
-                                    { icon: Activity, label: 'Status', val: drawer.is_blocked ? 'Blocked' : (drawer.is_online ? 'Online' : 'Offline') },
-                                    { icon: Clock, label: 'First Seen', val: formatWIB(drawer.first_seen) },
-                                ].map(r => (
-                                    <div key={r.label} className="flex items-center gap-2 p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/50">
-                                        <r.icon className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                                        <div>
-                                            <div className="text-[9px] uppercase tracking-wide text-slate-400">{r.label}</div>
-                                            <div className="text-[11px] font-medium text-slate-700 dark:text-slate-300">{r.val}</div>
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                            {/* Actions */}
-                            <div className="flex gap-2 mt-3">
-                                {drawer.is_blocked
-                                    ? <button onClick={() => setConfirm({ title: 'Unblock', msg: 'Unblock this device?', action: () => doAction(drawer.id, 'unblock', 'Unblocked') })} className="btn-ghost text-emerald-600 text-[12px] py-1.5 flex-1 justify-center"><ShieldCheck className="w-3.5 h-3.5" /> Unblock</button>
-                                    : <button onClick={() => setConfirm({ title: 'Block', msg: 'Block this device?', action: () => doAction(drawer.id, 'block', 'Blocked'), danger: true })} className="btn-ghost text-amber-600 text-[12px] py-1.5 flex-1 justify-center"><ShieldOff className="w-3.5 h-3.5" /> Block</button>
-                                }
-                                <button onClick={() => setConfirm({ title: 'Remove Device', msg: 'Remove this device?', action: () => doDelete(drawer.id), danger: true })} className="btn-ghost text-red-600 text-[12px] py-1.5 flex-1 justify-center"><Trash2 className="w-3.5 h-3.5" /> Remove</button>
-                            </div>
-                        </div>
-
-                        {/* Activity */}
-                        <div className="p-4">
-                            <h3 className="text-[12px] font-bold text-slate-700 dark:text-slate-300 mb-3">Recent Plugin Activity</h3>
-                            {drawerLoading ? (
-                                <div className="space-y-2">{[...Array(4)].map((_, i) => <div key={i} className="skeleton h-10 rounded-xl" />)}</div>
-                            ) : drawerData?.activities?.length === 0 ? (
-                                <div className="py-6 text-center text-[13px] text-slate-400">No plugin activity</div>
-                            ) : drawerData?.activities?.slice(0, 20).map((a, i) => (
-                                <div key={i} className="flex items-center justify-between py-2 px-3 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/40 border-l-2 border-slate-200 dark:border-slate-700 mb-1">
-                                    <div>
-                                        <span className="text-[12px] font-medium text-slate-800 dark:text-slate-200">{cleanPluginName(a.plugin_name)}</span>
-                                        <span className="ml-2 badge badge-info text-[9px]">{a.action}</span>
-                                        <div className="text-[10px] font-mono text-slate-400 mt-0.5">{a.ip_address}</div>
-                                    </div>
-                                    <span className="text-[10px] text-slate-400">{timeAgo(a.used_at)}</span>
-                                </div>
-                            ))}
-
-                            {drawerData?.playbacks?.length > 0 && (
-                                <>
-                                    <h3 className="text-[12px] font-bold text-slate-700 dark:text-slate-300 mb-3 mt-5">Recent Playbacks</h3>
-                                    {drawerData.playbacks.slice(0, 10).map((p, i) => (
-                                        <div key={i} className="py-2 px-3 mb-1 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/40 border-l-2 border-amber-300 dark:border-amber-500/40">
-                                            <div className="text-[12px] font-medium text-slate-800 dark:text-slate-200 truncate">{p.video_title || 'Unknown'}</div>
-                                            <div className="flex items-center gap-2 mt-0.5 text-[10px] text-slate-400">
-                                                <span>{cleanPluginName(p.plugin_name)}</span>
-                                                {p.source_provider && <><span>·</span><span>{p.source_provider}</span></>}
-                                                <span className="ml-auto">{timeAgo(p.played_at)}</span>
-                                            </div>
-                                        </div>
-                                    ))}
-                                </>
-                            )}
-                        </div>
-                    </div>
-                </>
-            )}
+            {/* ══ License Drawer ══ */}
+            <LicenseDrawer
+                drawer={drawer}
+                setDrawer={setDrawer}
+                setConfirm={setConfirm}
+                setEditModal={setEditModal}
+                openDrawer={openDrawer}
+                drawerLoading={drawerLoading}
+                drawerData={drawerData}
+            />
 
             {/* Confirm Modal */}
             <ConfirmModal

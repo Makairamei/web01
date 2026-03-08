@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { get, timeAgo, truncKey, copyText } from '../lib/api';
-import { Activity, Radio, Copy, Pause, Play, RefreshCw, Wifi } from 'lucide-react';
+import { Activity, Radio, Copy, Pause, Play, RefreshCw, Wifi, Eye } from 'lucide-react';
+import LicenseDrawer from '../components/LicenseDrawer';
 
 const EVENT_TYPES = ['All', 'VALIDATE_OK', 'VALIDATE_FAIL', 'PLUGIN_USE', 'PLAY', 'LOGIN_OK', 'LOGIN_FAIL'];
 
@@ -19,7 +20,15 @@ export default function LiveActivity() {
     const [paused, setPaused] = useState(false);
     const [filter, setFilter] = useState('All');
     const [counter, setCounter] = useState(0);
+    const [drawerOpen, setDrawerOpen] = useState(false);
+    const [drawerLicense, setDrawerLicense] = useState(null);
     const lastTs = useRef(null);
+
+    const openDrawer = (ev) => {
+        if (!ev.license_key) return;
+        setDrawerLicense({ license_key: ev.license_key });
+        setDrawerOpen(true);
+    };
 
     const fetchFeed = useCallback(async () => {
         try {
@@ -73,13 +82,29 @@ export default function LiveActivity() {
                 </div>
                 <div className="flex items-center gap-2">
                     {/* Filter */}
-                    <div className="flex items-center gap-1">
-                        {['All', 'VALIDATE_OK', 'VALIDATE_FAIL', 'PLAY'].map(t => (
-                            <button key={t} onClick={() => setFilter(t)}
-                                className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all ${filter === t ? 'bg-indigo-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-700'}`}>
-                                {t === 'All' ? 'All' : t.replace('_', ' ')}
-                            </button>
-                        ))}
+                    <div className="flex items-center gap-1.5 overflow-x-auto custom-scroll pb-1">
+                        {[
+                            { key: 'All', label: 'All', color: 'slate' },
+                            { key: 'VALIDATE_OK', label: 'Validate OK', color: 'emerald' },
+                            { key: 'VALIDATE_FAIL', label: 'Validate Fail', color: 'red' },
+                            { key: 'PLAY', label: 'Play', color: 'indigo' },
+                            { key: 'PLUGIN_USE', label: 'Plugin', color: 'amber' }
+                        ].map(t => {
+                            const isActive = filter === t.key;
+                            const colorMap = {
+                                slate: isActive ? 'bg-slate-700 text-white dark:bg-slate-200 dark:text-slate-900' : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700',
+                                emerald: isActive ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-500/10 dark:text-emerald-400 dark:hover:bg-emerald-500/20',
+                                red: isActive ? 'bg-red-600 text-white' : 'bg-red-50 text-red-700 hover:bg-red-100 dark:bg-red-500/10 dark:text-red-400 dark:hover:bg-red-500/20',
+                                indigo: isActive ? 'bg-indigo-600 text-white' : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 dark:bg-indigo-500/10 dark:text-indigo-400 dark:hover:bg-indigo-500/20',
+                                amber: isActive ? 'bg-amber-500 text-white' : 'bg-amber-50 text-amber-700 hover:bg-amber-100 dark:bg-amber-500/10 dark:text-amber-400 dark:hover:bg-amber-500/20'
+                            };
+                            return (
+                                <button key={t.key} onClick={() => setFilter(t.key)}
+                                    className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-all whitespace-nowrap ${colorMap[t.color]}`}>
+                                    {t.label}
+                                </button>
+                            );
+                        })}
                     </div>
                     <button onClick={() => setPaused(v => !v)} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium transition-all ${paused ? 'bg-emerald-100 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>
                         {paused ? <><Play className="w-3 h-3" /> Resume</> : <><Pause className="w-3 h-3" /> Pause</>}
@@ -118,10 +143,10 @@ export default function LiveActivity() {
                                         <td>
                                             {ev.license_key ? (
                                                 <div className="flex flex-col">
-                                                    <span className="text-[12px] font-semibold text-slate-800 dark:text-slate-200">
+                                                    <button onClick={() => openDrawer(ev)} className="text-[12px] font-semibold text-slate-800 dark:text-slate-200 hover:text-indigo-600 hover:underline text-left">
                                                         {ev.license_name || 'Unnamed License'}
-                                                    </span>
-                                                    <button onClick={() => copyText(ev.license_key)} className="flex items-center gap-1 font-mono text-[11px] text-indigo-600 dark:text-indigo-400 hover:underline">
+                                                    </button>
+                                                    <button onClick={() => copyText(ev.license_key)} className="flex items-center gap-1 font-mono text-[11px] text-indigo-600 dark:text-indigo-400 hover:underline w-fit">
                                                         {truncKey(ev.license_key)} <Copy className="w-3 h-3 opacity-40" />
                                                     </button>
                                                 </div>
@@ -130,15 +155,15 @@ export default function LiveActivity() {
                                         <td><span className={`badge ${badge}`}>{ev.action || ev.type || 'EVENT'}</span></td>
                                         <td className="text-[12px] text-slate-600 dark:text-slate-400">
                                             {ev.ip_address || ev.device_name || ev.device_id ? (
-                                                <div className="flex flex-col">
-                                                    <span className="font-medium text-[11px] text-slate-700 dark:text-slate-300">
+                                                <div className="flex flex-col gap-0.5">
+                                                    <button onClick={() => openDrawer(ev)} className="font-medium text-[11px] text-slate-700 dark:text-slate-300 hover:text-indigo-600 hover:underline text-left">
                                                         {ev.device_name || 'Unknown Device'}
-                                                    </span>
+                                                    </button>
                                                     <span className="font-mono text-[10px] text-slate-500">
                                                         {ev.ip_address || '—'}
                                                     </span>
                                                     {ev.device_id && (
-                                                        <span className="font-mono text-[9px] text-slate-400/80 mt-0.5" title="Raw Device ID">
+                                                        <span className="font-mono text-[9px] text-slate-400/80" title="Raw Device ID">
                                                             ID: {ev.device_id.length > 15 ? ev.device_id.substring(0, 15) + '…' : ev.device_id}
                                                         </span>
                                                     )}
@@ -160,6 +185,13 @@ export default function LiveActivity() {
                     </div>
                 )}
             </div>
+
+            {/* Slide-out Drawer */}
+            <LicenseDrawer
+                isOpen={drawerOpen}
+                onClose={() => setDrawerOpen(false)}
+                license={drawerLicense}
+            />
         </div>
     );
 }

@@ -35,11 +35,11 @@ export default function Header({ dark, setDark }) {
         get('/admin/dashboard').then(d => {
             const a = [];
             if ((d.expiring_soon || 0) > 0)
-                a.push({ type: 'warning', text: `${d.expiring_soon} license(s) expiring within 3 days` });
-            if ((d.blockedIPs || 0) > 0) // Updated to camelCase per recent fixes
-                a.push({ type: 'error', text: `${d.blockedIPs} blocked IP(s) detected` });
-            if ((d.totalPlaybacks || 0) > 500) // Updated keys
-                a.push({ type: 'info', text: 'High validation volume today' });
+                a.push({ type: 'warning', text: `${d.expiring_soon} license(s) expiring within 3 days`, to: '/licenses' });
+            if ((d.blockedIPs || 0) > 0)
+                a.push({ type: 'error', text: `${d.blockedIPs} blocked IP(s) detected`, to: '/security' });
+            if ((d.totalPlaybacks || 0) > 500)
+                a.push({ type: 'info', text: 'High validation volume today', to: '/analytics' });
             setAlerts(a);
         }).catch(() => { });
     }, [loc.pathname]);
@@ -151,10 +151,14 @@ export default function Header({ dark, setDark }) {
                                 {alerts.length === 0 ? (
                                     <div className="p-6 text-center text-slate-400 text-[12px]">No new notifications</div>
                                 ) : alerts.map((a, i) => (
-                                    <div key={i} className="px-4 py-3 hover:bg-slate-50 dark:hover:bg-slate-800/50 border-b border-slate-100 dark:border-slate-800 last:border-0 flex gap-3">
+                                    <button
+                                        key={i}
+                                        onClick={() => { setShowAlerts(false); nav(a.to || '/dashboard'); }}
+                                        className="w-full text-left px-4 py-3 hover:bg-slate-50 dark:hover:bg-slate-800/50 border-b border-slate-100 dark:border-slate-800 last:border-0 flex gap-3 transition-colors"
+                                    >
                                         <div className={`mt-0.5 w-1.5 h-1.5 rounded-full shrink-0 ${a.type === 'error' ? 'bg-red-500' : a.type === 'warning' ? 'bg-amber-500' : 'bg-blue-500'}`} />
-                                        <div className="text-[12px] text-slate-600 dark:text-slate-300 leading-relaxed">{a.text}</div>
-                                    </div>
+                                        <div className="text-[12px] text-slate-600 dark:text-slate-300 leading-relaxed font-medium">{a.text}</div>
+                                    </button>
                                 ))}
                             </div>
                         </div>

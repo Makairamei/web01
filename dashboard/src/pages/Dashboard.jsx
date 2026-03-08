@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { get, post, formatNumber, truncKey, timeAgo, copyText, cleanPluginName, formatWIB } from '../lib/api';
 import {
-    KeyRound, Smartphone, ShieldCheck, Activity, Play, AlertTriangle,
+    KeyRound, Smartphone, ShieldCheck, Activity, Play, AlertTriangle, X,
     TrendingUp, TrendingDown, RefreshCw, Copy, Ban, Wifi, WifiOff, Monitor, Clock
 } from 'lucide-react';
 import {
@@ -12,15 +12,18 @@ import {
 // ── Sub-components ────────────────────────────────────────────────
 function KpiCard({ icon: Icon, label, value, sub, gradient, accent }) {
     return (
-        <div className={`${gradient} rounded-2xl p-5 border transition-all duration-200 hover:shadow-lg hover:-translate-y-0.5 cursor-default fade-in`}>
-            <div className="flex items-start justify-between mb-3">
-                <div className="p-2 rounded-xl bg-white/60 dark:bg-slate-900/50">
+        <div className={`relative overflow-hidden ${gradient} rounded-2xl p-5 border transition-all duration-300 hover:shadow-xl hover:-translate-y-1 cursor-default fade-in group`}>
+            {/* Subtle glow effect */}
+            <div className="absolute -inset-2 opacity-0 group-hover:opacity-20 transition-opacity duration-500 blur-xl bg-white dark:bg-slate-400 pointer-events-none" />
+
+            <div className="flex items-start justify-between mb-3 relative z-10">
+                <div className="p-2.5 rounded-xl bg-white/70 dark:bg-slate-900/60 shadow-[0_2px_8px_rgba(0,0,0,0.04)] dark:shadow-[0_2px_8px_rgba(0,0,0,0.2)]">
                     <Icon className={`w-4 h-4 ${accent || 'text-slate-700 dark:text-slate-300'}`} />
                 </div>
             </div>
-            <div className="text-2xl font-bold text-slate-900 dark:text-white">{formatNumber(value) ?? '—'}</div>
-            <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">{label}</div>
-            {sub && <div className="text-[10px] text-slate-400 mt-1">{sub}</div>}
+            <div className="text-2xl font-black text-slate-900 dark:text-white tracking-tight relative z-10">{formatNumber(value) ?? '—'}</div>
+            <div className="text-[12px] font-semibold text-slate-600 dark:text-slate-300 mt-1 relative z-10">{label}</div>
+            {sub && <div className="text-[10px] font-medium text-slate-400 dark:text-slate-500 mt-0.5 relative z-10">{sub}</div>}
         </div>
     );
 }
@@ -142,9 +145,17 @@ export default function Dashboard() {
     const [analytics, setAnalytics] = useState(null);
     const [salesData, setSalesData] = useState(null);
     const [salesRange, setSalesRange] = useState('30');
+    const [analyticsDays, setAnalyticsDays] = useState('7');
     const [loading, setLoading] = useState(true);
+    const [dismissedAlerts, setDismissedAlerts] = useState(() => {
+        try { return JSON.parse(localStorage.getItem('dismissedAlerts') || '[]'); } catch { return []; }
+    });
     const [autoRefresh, setAutoRefresh] = useState(true);
     const [lastUpdated, setLastUpdated] = useState(null);
+
+    useEffect(() => {
+        localStorage.setItem('dismissedAlerts', JSON.stringify(dismissedAlerts));
+    }, [dismissedAlerts]);
 
     const fetchSales = useCallback(async (range) => {
         try {
@@ -153,26 +164,31 @@ export default function Dashboard() {
         } catch { }
     }, []);
 
+    const fetchAnalytics = useCallback(async (days) => {
+        try {
+            const a = await get(`/admin/analytics/plugins?days=${days}`);
+            setAnalytics(a);
+        } catch { }
+    }, []);
+
     const fetchAll = useCallback(async () => {
         try {
-            const [s, f, a] = await Promise.all([
+            const [s, f] = await Promise.all([
                 get('/admin/dashboard'),
-                get('/admin/activity-feed?minutes=1440&limit=25'),
-                get('/admin/analytics/plugins?days=7').catch(() => null),
+                get('/admin/activity-feed?minutes=1440&limit=25')
             ]);
             setStats(s);
             setFeed(f.feed || []);
-            setAnalytics(a);
             setLastUpdated(new Date());
         } catch { } finally { setLoading(false); }
     }, []);
 
-    useEffect(() => { fetchAll(); fetchSales(salesRange); }, [fetchAll, fetchSales, salesRange]);
+    useEffect(() => { fetchAll(); fetchSales(salesRange); fetchAnalytics(analyticsDays); }, [fetchAll, fetchSales, salesRange, fetchAnalytics, analyticsDays]);
     useEffect(() => {
         if (!autoRefresh) return;
-        const id = setInterval(() => { fetchAll(); fetchSales(salesRange); }, 30000);
+        const id = setInterval(() => { fetchAll(); fetchSales(salesRange); fetchAnalytics(analyticsDays); }, 30000);
         return () => clearInterval(id);
-    }, [autoRefresh, fetchAll, fetchSales, salesRange]);
+    }, [autoRefresh, fetchAll, fetchSales, salesRange, fetchAnalytics, analyticsDays]);
 
     // Build license activity chart data (licenses vs expirations vs blocks)
     const salesChartData = useMemo(() => {
@@ -229,11 +245,11 @@ export default function Dashboard() {
         const r = [];
         if (!stats) return r;
         if ((stats.expiring_soon || 0) > 0)
-            r.push({ title: 'Licenses expiring soon', detail: `${stats.expiring_soon} licenses expire within 3 days`, severity: 'medium' });
+            r.push({ id: 'expiring', title: 'Licenses expiring soon', detail: `${stats.expiring_soon} licenses expire within 3 days`, severity: 'medium' });
         if ((stats.blockedIPs || 0) > 0)
-            r.push({ title: 'Blocked IPs detected', detail: `${stats.blockedIPs} IP(s) currently blocked`, severity: 'high' });
-        return r;
-    }, [stats]);
+            r.push({ id: 'blocked-ips', title: 'Blocked IPs detected', detail: `${stats.blockedIPs} IP(s) currently blocked`, severity: 'high' });
+        return r.filter(a => !dismissedAlerts.includes(a.id));
+    }, [stats, dismissedAlerts]);
 
     const eventTypeColor = (type) => {
         if (!type) return 'badge-info';
@@ -276,12 +292,21 @@ export default function Dashboard() {
             {alerts.length > 0 && (
                 <div className="space-y-2">
                     {alerts.map((a, i) => (
-                        <div key={i} className={`severity-${a.severity} rounded-xl p-3.5 flex items-center gap-3 fade-in`}>
-                            <AlertTriangle className="w-4 h-4 shrink-0" />
-                            <div className="flex-1 min-w-0">
-                                <span className="text-[13px] font-semibold">{a.title}</span>
-                                {a.detail && <span className="text-[12px] opacity-75 ml-2">{a.detail}</span>}
+                        <div key={i} className={`severity-${a.severity} rounded-xl p-3.5 flex items-center justify-between gap-3 fade-in group`}>
+                            <div className="flex items-center gap-3 min-w-0">
+                                <AlertTriangle className="w-4 h-4 shrink-0" />
+                                <div className="flex-1 min-w-0">
+                                    <span className="text-[13px] font-semibold">{a.title}</span>
+                                    {a.detail && <span className="text-[12px] opacity-75 ml-2 hide-on-mobile">{a.detail}</span>}
+                                </div>
                             </div>
+                            <button
+                                onClick={() => setDismissedAlerts(prev => [...prev, a.id])}
+                                className="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition-colors opacity-60 hover:opacity-100"
+                                title="Dismiss"
+                            >
+                                <X className="w-4 h-4" />
+                            </button>
                         </div>
                     ))}
                 </div>
@@ -348,7 +373,15 @@ export default function Dashboard() {
                 <div className="glass-card p-5">
                     <div className="flex items-center justify-between mb-4">
                         <h3 className="text-[13px] font-semibold text-slate-700 dark:text-slate-300">Top Plugins</h3>
-                        <span className="text-[10px] text-slate-400">7 days</span>
+                        <select
+                            value={analyticsDays}
+                            onChange={e => setAnalyticsDays(e.target.value)}
+                            className="text-[11px] font-medium px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-transparent text-slate-500 cursor-pointer hover:border-indigo-400 transition-colors focus:outline-none"
+                        >
+                            <option value="7">7 Days</option>
+                            <option value="30">30 Days</option>
+                            <option value="all">All Time</option>
+                        </select>
                     </div>
                     {topPlugins.length === 0 ? (
                         <div className="flex flex-col items-center justify-center py-8 gap-2">
@@ -387,7 +420,15 @@ export default function Dashboard() {
                 <div className="glass-card p-5">
                     <div className="flex items-center justify-between mb-4">
                         <h3 className="text-[13px] font-semibold text-slate-700 dark:text-slate-300">Most Watched</h3>
-                        <span className="text-[10px] text-slate-400">7 days</span>
+                        <select
+                            value={analyticsDays}
+                            onChange={e => setAnalyticsDays(e.target.value)}
+                            className="text-[11px] font-medium px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-transparent text-slate-500 cursor-pointer hover:border-amber-400 transition-colors focus:outline-none"
+                        >
+                            <option value="7">7 Days</option>
+                            <option value="30">30 Days</option>
+                            <option value="all">All Time</option>
+                        </select>
                     </div>
                     {topContent.length === 0 ? (
                         <div className="flex flex-col items-center justify-center py-8 gap-2">
