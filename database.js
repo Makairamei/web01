@@ -893,12 +893,69 @@ function getDashboardStats() {
     // Blocked Devices count
     const blockedDevices = get("SELECT COUNT(*) as c FROM devices WHERE is_blocked = 1")?.c || 0;
 
+    // ── Enhanced fields for Analytics page ──────────────────────
+    // Validation counts today
+    const validationsToday = get("SELECT COUNT(*) as c FROM access_logs WHERE action IN ('VERIFY_OK','REPO_LOAD','PLUGINS_LOAD','CHECK_OK') AND created_at > datetime('now', '-1 day')")?.c || 0;
+    const validationFailedToday = get("SELECT COUNT(*) as c FROM access_logs WHERE (action LIKE '%FAIL%' OR action LIKE '%BLOCK%' OR action LIKE '%INVALID%' OR action = 'VERIFY_FAIL') AND created_at > datetime('now', '-1 day')")?.c || 0;
+
+    // Expiring soon (next 7 days)
+    const expiringSoon = get("SELECT COUNT(*) as c FROM licenses WHERE status = 'active' AND expires_at > datetime('now','localtime') AND expires_at <= datetime('now', '+7 days', 'localtime') AND deleted_at IS NULL")?.c || 0;
+
+    // Top users (most active licenses last 7 days)
+    const topUsers = all(`
+        SELECT al.license_key, l.name as license_name,
+               COUNT(*) as activity
+        FROM access_logs al
+        LEFT JOIN licenses l ON al.license_key = l.license_key
+        WHERE al.license_key != '' AND al.created_at > datetime('now', '-7 days')
+        GROUP BY al.license_key
+        ORDER BY activity DESC LIMIT 10`);
+
+    // Top devices (most active last 7 days)
+    const topDevices = all(`
+        SELECT al.device_id, d.device_name, d.license_key,
+               l.name as license_name, COUNT(*) as activity
+        FROM access_logs al
+        LEFT JOIN devices d ON al.device_id = d.device_id
+        LEFT JOIN licenses l ON d.license_key = l.license_key
+        WHERE al.device_id != '' AND al.created_at > datetime('now', '-7 days')
+        GROUP BY al.device_id
+        ORDER BY activity DESC LIMIT 10`);
+
+    // Top videos (most played last 7 days)
+    const topVideos = all(`
+        SELECT video_title, plugin_name, COUNT(*) as play_count
+        FROM playback_logs
+        WHERE played_at > datetime('now', '-7 days') AND video_title != ''
+        GROUP BY video_title
+        ORDER BY play_count DESC LIMIT 10`);
+
+    // 7-day daily trend (for mini sparklines)
+    const dailyTrend = all(`
+        SELECT date(created_at) as day,
+               SUM(CASE WHEN action IN ('VERIFY_OK','REPO_LOAD','PLUGINS_LOAD','CHECK_OK') THEN 1 ELSE 0 END) as validations,
+               SUM(CASE WHEN action LIKE '%FAIL%' OR action LIKE '%BLOCK%' THEN 1 ELSE 0 END) as failures
+        FROM access_logs
+        WHERE created_at > datetime('now', '-7 days')
+        GROUP BY day ORDER BY day`);
+
+    const dailyPlaybacks = all(`
+        SELECT date(played_at) as day, COUNT(*) as count
+        FROM playback_logs
+        WHERE played_at > datetime('now', '-7 days')
+        GROUP BY day ORDER BY day`);
+
     return {
         totalLicenses, activeLicenses, expiredLicenses, revokedLicenses,
         totalDevices, activeDevices, blockedDevices,
+        offlineDevices: Math.max(0, totalDevices - activeDevices - blockedDevices),
+        expiringSoon,
         totalPluginEvents, totalPlaybacks,
         todayPluginEvents, todayPlaybacks,
-        topPlugins, topSources, recentActivity, blockedIPs
+        validationsToday, validationFailedToday,
+        topPlugins, topSources, topUsers, topDevices, topVideos,
+        dailyTrend, dailyPlaybacks,
+        recentActivity, blockedIPs
     };
 }
 
