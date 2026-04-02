@@ -1233,6 +1233,209 @@ function getUnreadAlertCount() {
 }
 
 // ============================================================
+// COMPREHENSIVE ANALYTICS DATA
+// ============================================================
+
+function getAnalyticsData(period = 'week') {
+    // Build time filter based on period
+    let timeFilter;
+    if (period === 'today') {
+        timeFilter = "datetime('now', '-1 day')";
+    } else if (period === 'month') {
+        timeFilter = "datetime('now', '-30 days')";
+    } else {
+        // default: week
+        timeFilter = "datetime('now', '-7 days')";
+    }
+
+    // ── LICENSE ANALYTICS ──────────────────────────────
+    const totalLicenses = get("SELECT COUNT(*) as c FROM licenses WHERE deleted_at IS NULL")?.c || 0;
+    const activeLicenses = get("SELECT COUNT(*) as c FROM licenses WHERE status = 'active' AND expires_at > datetime('now') AND deleted_at IS NULL")?.c || 0;
+    const expiredLicenses = get("SELECT COUNT(*) as c FROM licenses WHERE (status = 'expired' OR (status = 'active' AND expires_at <= datetime('now'))) AND deleted_at IS NULL")?.c || 0;
+    const revokedLicenses = get("SELECT COUNT(*) as c FROM licenses WHERE status = 'revoked' AND deleted_at IS NULL")?.c || 0;
+    const expiringSoon = get("SELECT COUNT(*) as c FROM licenses WHERE status = 'active' AND expires_at > datetime('now') AND expires_at <= datetime('now', '+7 days') AND deleted_at IS NULL")?.c || 0;
+
+    // Trial = licenses with max_devices=1 and short duration (created within last 30 days, expires within 7 days of creation)
+    const trialLicenses = get(`SELECT COUNT(*) as c FROM licenses 
+        WHERE max_devices = 1 AND deleted_at IS NULL 
+        AND CAST((julianday(expires_at) - julianday(created_at)) AS INTEGER) <= 7`)?.c || 0;
+
+    // Renewal rate = licenses that were expired then re-activated vs total expired
+    const totalEverExpired = get("SELECT COUNT(*) as c FROM licenses WHERE (status = 'expired' OR expires_at <= datetime('now')) AND deleted_at IS NULL")?.c || 0;
+    const renewedLicenses = get("SELECT COUNT(*) as c FROM access_logs WHERE action = 'LICENSE_ACTIVATE' AND created_at > datetime('now', '-90 days')")?.c || 0;
+    const licenseRenewalRate = totalEverExpired > 0 ? Math.round((renewedLicenses / totalEverExpired) * 100) : 0;
+
+    // ── DEVICE ANALYTICS ──────────────────────────────
+    const totalDevices = get("SELECT COUNT(*) as c FROM devices")?.c || 0;
+    const devicesOnline = get("SELECT COUNT(*) as c FROM devices WHERE last_seen > datetime('now', '-30 minutes') AND is_blocked = 0")?.c || 0;
+    const devicesOffline = get("SELECT COUNT(*) as c FROM devices WHERE last_seen <= datetime('now', '-30 minutes') AND is_blocked = 0")?.c || 0;
+    const devicesBlocked = get("SELECT COUNT(*) as c FROM devices WHERE is_blocked = 1")?.c || 0;
+    // Devices linked to expired licenses
+    const devicesExpired = get(`SELECT COUNT(*) as c FROM devices d 
+        JOIN licenses l ON d.license_key = l.license_key 
+        WHERE (l.status = 'expired' OR (l.status = 'active' AND l.expires_at <= datetime('now'))) 
+        AND d.is_blocked = 0`)?.c || 0;
+
+    // Avg devices per license
+    const avgDevicesPerLicense = get("SELECT ROUND(AVG(cnt), 1) as avg FROM (SELECT COUNT(*) as cnt FROM devices GROUP BY license_key)")?.avg || 0;
+
+    // New devices registered today
+    const newDevicesToday = get("SELECT COUNT(*) as c FROM devices WHERE first_seen > datetime('now', '-1 day')")?.c || 0;
+
+    // Distinct devices active today (any activity)
+    const deviceLoginToday = get("SELECT COUNT(DISTINCT device_id) as c FROM plugin_usage WHERE device_id != '' AND used_at > datetime('now', '-1 day')")?.c || 0;
+
+    // Suspicious devices (flagged in abuse_alerts in last 7 days)
+    const suspiciousDevices = get("SELECT COUNT(DISTINCT device_id) as c FROM abuse_alerts WHERE device_id != '' AND created_at > datetime('now', '-7 days')")?.c || 0;
+
+    // ── ACTIVITY ANALYTICS ──────────────────────────────
+    const todayPlaybacks = get("SELECT COUNT(*) as c FROM playback_logs WHERE played_at > datetime('now', '-1 day')")?.c || 0;
+    const todayValidations = get("SELECT COUNT(*) as c FROM plugin_usage WHERE used_at > datetime('now', '-1 day')")?.c || 0;
+
+    // Playback = PLAY actions from playback_logs
+    const playbackSuccess = get("SELECT COUNT(*) as c FROM playback_logs WHERE source_provider != 'DOWNLOAD' AND played_at > datetime('now', '-1 day')")?.c || 0;
+    // Failed = access_logs with FAIL in action today
+    const playbackFailed = get("SELECT COUNT(*) as c FROM access_logs WHERE action LIKE '%FAIL%' AND created_at > datetime('now', '-1 day')")?.c || 0;
+    const validationFailed = get("SELECT COUNT(*) as c FROM access_logs WHERE (action = 'VERIFY_FAIL' OR action = 'CHECK_IP_FAIL' OR action = 'VALIDATE_FAIL' OR action = 'TOKEN_DENY') AND created_at > datetime('now', '-1 day')")?.c || 0;
+    const apiRequestCount = get("SELECT COUNT(*) as c FROM access_logs WHERE created_at > datetime('now', '-1 day')")?.c || 0;
+
+    // ── INSIGHT: TOP USERS ──────────────────────────────
+    const topUsersToday = all(`
+        SELECT pu.license_key, l.name as license_name, COUNT(*) as activity
+        FROM plugin_usage pu
+        LEFT JOIN licenses l ON pu.license_key = l.license_key
+        WHERE pu.license_key != '' AND pu.used_at > datetime('now', '-1 day')
+        GROUP BY pu.license_key
+        ORDER BY activity DESC LIMIT 10`);
+
+    const topUsersWeek = all(`
+        SELECT pu.license_key, l.name as license_name, COUNT(*) as activity
+        FROM plugin_usage pu
+        LEFT JOIN licenses l ON pu.license_key = l.license_key
+        WHERE pu.license_key != '' AND pu.used_at > datetime('now', '-7 days')
+        GROUP BY pu.license_key
+        ORDER BY activity DESC LIMIT 10`);
+
+    // ── INSIGHT: TOP DEVICES ──────────────────────────────
+    const topDevicesToday = all(`
+        SELECT pu.device_id, d.device_name, d.device_alias, d.license_key, 
+               l.name as license_name, COUNT(*) as activity
+        FROM plugin_usage pu
+        LEFT JOIN devices d ON pu.device_id = d.device_id AND pu.license_key = d.license_key
+        LEFT JOIN licenses l ON pu.license_key = l.license_key
+        WHERE pu.device_id != '' AND pu.used_at > datetime('now', '-1 day')
+        GROUP BY pu.device_id
+        ORDER BY activity DESC LIMIT 10`);
+
+    const topDevicesWeek = all(`
+        SELECT pu.device_id, d.device_name, d.device_alias, d.license_key,
+               l.name as license_name, COUNT(*) as activity
+        FROM plugin_usage pu
+        LEFT JOIN devices d ON pu.device_id = d.device_id AND pu.license_key = d.license_key
+        LEFT JOIN licenses l ON pu.license_key = l.license_key
+        WHERE pu.device_id != '' AND pu.used_at > datetime('now', '-7 days')
+        GROUP BY pu.device_id
+        ORDER BY activity DESC LIMIT 10`);
+
+    // ── INSIGHT: TOP PLUGINS ──────────────────────────────
+    const topPluginsToday = all(`
+        SELECT plugin_name, COUNT(*) as count
+        FROM plugin_usage
+        WHERE used_at > datetime('now', '-1 day')
+        GROUP BY plugin_name ORDER BY count DESC LIMIT 10`);
+
+    const topPluginsWeek = all(`
+        SELECT plugin_name, COUNT(*) as count
+        FROM plugin_usage
+        WHERE used_at > datetime('now', '-7 days')
+        GROUP BY plugin_name ORDER BY count DESC LIMIT 10`);
+
+    const mostPopularPlugin = all(`
+        SELECT plugin_name, COUNT(*) as count
+        FROM plugin_usage
+        GROUP BY plugin_name ORDER BY count DESC LIMIT 10`);
+
+    // ── INSIGHT: TOP VIDEOS ──────────────────────────────
+    const topVideosToday = all(`
+        SELECT video_title, plugin_name, COUNT(*) as play_count
+        FROM playback_logs
+        WHERE video_title != '' AND played_at > datetime('now', '-1 day')
+        GROUP BY video_title ORDER BY play_count DESC LIMIT 10`);
+
+    const topVideosWeek = all(`
+        SELECT video_title, plugin_name, COUNT(*) as play_count
+        FROM playback_logs
+        WHERE video_title != '' AND played_at > datetime('now', '-7 days')
+        GROUP BY video_title ORDER BY play_count DESC LIMIT 10`);
+
+    const mostPopularVideo = all(`
+        SELECT video_title, plugin_name, COUNT(*) as play_count
+        FROM playback_logs
+        WHERE video_title != ''
+        GROUP BY video_title ORDER BY play_count DESC LIMIT 10`);
+
+    // ── INSIGHT: MOST DEVICES PER USER ──────────────────
+    const mostDevicesPerUser = all(`
+        SELECT d.license_key, l.name as license_name, COUNT(*) as device_count
+        FROM devices d
+        LEFT JOIN licenses l ON d.license_key = l.license_key
+        GROUP BY d.license_key
+        ORDER BY device_count DESC LIMIT 10`);
+
+    // ── CHART DATA ──────────────────────────────────────
+    // Daily trend for chart period
+    const chartDays = period === 'today' ? 1 : (period === 'month' ? 30 : 7);
+
+    const dailyValidations = all(`
+        SELECT date(used_at) as day, COUNT(*) as count
+        FROM plugin_usage
+        WHERE used_at > datetime('now', '-${chartDays} days')
+        GROUP BY day ORDER BY day`);
+
+    const dailyPlaybacks = all(`
+        SELECT date(played_at) as day, COUNT(*) as count
+        FROM playback_logs
+        WHERE played_at > datetime('now', '-${chartDays} days')
+        GROUP BY day ORDER BY day`);
+
+    const dailyFailures = all(`
+        SELECT date(created_at) as day, COUNT(*) as count
+        FROM access_logs
+        WHERE (action = 'VERIFY_FAIL' OR action = 'CHECK_IP_FAIL' OR action = 'VALIDATE_FAIL' OR action = 'TOKEN_DENY')
+        AND created_at > datetime('now', '-${chartDays} days')
+        GROUP BY day ORDER BY day`);
+
+    // Hourly activity (last 24h)
+    const hourlyActivity = all(`
+        SELECT strftime('%H', used_at) as hour, COUNT(*) as count
+        FROM plugin_usage
+        WHERE used_at > datetime('now', '-1 day')
+        GROUP BY hour ORDER BY hour`);
+
+    return {
+        // License
+        totalLicenses, activeLicenses, expiredLicenses, revokedLicenses,
+        expiringSoon, trialLicenses, licenseRenewalRate,
+        // Device
+        totalDevices, devicesOnline, devicesOffline, devicesBlocked, devicesExpired,
+        avgDevicesPerLicense, newDevicesToday, deviceLoginToday, suspiciousDevices,
+        // Activity
+        todayPlaybacks, todayValidations, playbackSuccess, playbackFailed,
+        validationFailed, apiRequestCount,
+        // Insights
+        topUsersToday, topUsersWeek,
+        topDevicesToday, topDevicesWeek,
+        topPluginsToday, topPluginsWeek, mostPopularPlugin,
+        topVideosToday, topVideosWeek, mostPopularVideo,
+        mostDevicesPerUser,
+        // Charts
+        dailyValidations, dailyPlaybacks, dailyFailures, hourlyActivity,
+        // Meta
+        period
+    };
+}
+
+// ============================================================
 // EXPORTS
 // ============================================================
 
@@ -1271,7 +1474,7 @@ module.exports = {
     // Admin
     getAdminByUsername, updateAdminPassword,
     // Dashboard
-    getDashboardStats, getSalesAnalytics,
+    getDashboardStats, getSalesAnalytics, getAnalyticsData,
     // Repositories
     getRepositories, addRepository, deleteRepository,
     // Log cleanup

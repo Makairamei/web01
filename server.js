@@ -322,21 +322,21 @@ app.get('/api/check-ip', rateLimit(60000, 120), (req, res) => {
         if (action && action !== 'CHECK') {
             const trackableActions = ['HOME', 'OPEN', 'SEARCH', 'LOAD', 'PLAY', 'SWITCH', 'DOWNLOAD'];
             if (pluginName && trackableActions.includes(action)) {
-                db.trackPluginUsage(session.key, deviceId, pluginName, action, ip);
+                db.trackPluginUsage(key, deviceId, pluginName, action, ip);
             }
 
             if (action === 'HOME') {
-                db.logAccess(session.key, 'HOME_ACCESS', ip, `plugin:${pluginName} device:${deviceId}`, deviceId);
+                db.logAccess(key, 'HOME_ACCESS', ip, `plugin:${pluginName} device:${deviceId}`, deviceId);
             } else if (action === 'SWITCH') {
-                db.logAccess(session.key, 'PLUGIN_SWITCH', ip, `plugin:${pluginName} device:${deviceId}`, deviceId);
+                db.logAccess(key, 'PLUGIN_SWITCH', ip, `plugin:${pluginName} device:${deviceId}`, deviceId);
             } else if (action === 'DOWNLOAD' || action === 'PLAY') {
-                db.logAccess(session.key, action, ip, `plugin:${pluginName} data:${data} device:${deviceId}`, deviceId);
+                db.logAccess(key, action, ip, `plugin:${pluginName} data:${data} device:${deviceId}`, deviceId);
                 if (data) {
-                    db.trackPlayback(session.key, deviceId, pluginName, data,
+                    db.trackPlayback(key, deviceId, pluginName, data,
                         action === 'DOWNLOAD' ? 'DOWNLOAD' : '', ip);
                 }
             } else if (action === 'SEARCH') {
-                db.logAccess(session.key, 'SEARCH', ip, `plugin:${pluginName} query:${data} device:${deviceId}`, deviceId);
+                db.logAccess(key, 'SEARCH', ip, `plugin:${pluginName} query:${data} device:${deviceId}`, deviceId);
             }
         }
 
@@ -1337,6 +1337,21 @@ app.get('/api/admin/logs', authMiddleware, (req, res) => {
         res.json({ status: 'ok', ...result });
     } catch (e) {
         console.error('Access logs error:', e.message);
+        res.status(500).json({ status: 'error', message: 'Server error' });
+    }
+});
+
+// ============================================================
+// ADMIN — Analytics Overview (Comprehensive)
+// ============================================================
+
+app.get('/api/admin/analytics/overview', authMiddleware, (req, res) => {
+    try {
+        const period = req.query.period || 'week';
+        const data = db.getAnalyticsData(period);
+        res.json({ status: 'ok', ...data });
+    } catch (e) {
+        console.error('Analytics overview error:', e.message);
         res.status(500).json({ status: 'error', message: 'Server error' });
     }
 });
