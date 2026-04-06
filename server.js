@@ -1699,15 +1699,15 @@ app.get('/api/admin/settings', authMiddleware, (req, res) => {
 
 app.put('/api/admin/settings', authMiddleware, (req, res) => {
     try {
-        const { settings } = req.body;
-        if (settings && typeof settings === 'object') {
+        const settings = req.body.settings || req.body;
+        if (settings && typeof settings === 'object') {  
             for (const [k, v] of Object.entries(settings)) {
                 db.setSetting(k, v);
             }
         }
         db.logAccess('', 'SETTINGS_UPDATE', getClientIP(req), `by ${req.admin.username}`);
         const settingsText = settings ? Object.keys(settings).map(k => `${k}: ${settings[k]}`).join('\n') : '';
-        db.logAdminAction(req.admin.username, 'UPDATE_SETTINGS', `Updated global system settings: \n\n${settingsText}`, getClientIP(req));
+        db.logAdminAction(req.admin.username, 'UPDATE_SETTINGS', `Updated global system settings:\n\n${settingsText}`, getClientIP(req));
         res.json({ status: 'ok' });
     } catch (e) {
         res.status(500).json({ status: 'error', message: 'Server error' });
