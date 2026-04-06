@@ -1,4 +1,4 @@
-import { useState, useCallback, Fragment } from 'react';
+import { useState, useCallback, useEffect, Fragment } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { get, put, del, formatWIB } from '../lib/api';
 import { useApi } from '../hooks/useApi';
@@ -18,16 +18,20 @@ const LIMIT = 10;
 export default function Devices() {
     const toast = useToast();
     const navigate = useNavigate();
-    const [searchParams] = useSearchParams();
+    const [searchParams, setSearchParams] = useSearchParams();
     const [page, setPage] = useState(1);
     const [search, setSearch] = useState(() => searchParams.get('search') || '');
     const [searchInput, setSearchInput] = useState(() => searchParams.get('search') || '');
-    const [statusFilter, setStatusFilter] = useState(() => searchParams.get('status') || '');
+    const [statusFilter, setStatusFilter] = useState(() => searchParams.get('status') || 'all');
     const [confirm, setConfirm] = useState(null);
     const [selected, setSelected] = useState(new Set());
 
+    useEffect(() => {
+        setStatusFilter(searchParams.get('status') || 'all');
+    }, [searchParams]);
+
     const { data, loading, refetch } = useApi(
-        `/admin/devices?page=${page}&limit=${LIMIT}&search=${encodeURIComponent(search)}&status=${statusFilter}`,
+        `/admin/devices?page=${page}&limit=${LIMIT}&search=${encodeURIComponent(search)}&status=${statusFilter === 'all' ? '' : statusFilter}`,
         [page, search, statusFilter]
     );
 
@@ -130,13 +134,13 @@ export default function Devices() {
             {/* Status Filters */}
             <div className="flex items-center gap-2 overflow-x-auto custom-scroll pb-1">
                 {[
-                    { key: '', label: 'All', color: 'slate' },
+                    { key: 'all', label: 'All', color: 'slate' },
                     { key: 'online', label: 'Online', color: 'emerald' },
                     { key: 'offline', label: 'Offline', color: 'amber' },
                     { key: 'blocked', label: 'Blocked', color: 'red' }
                 ].map(s => {
                     const isActive = statusFilter === s.key;
-                    const count = s.key === '' ? counts.all : counts[s.key];
+                    const count = s.key === 'all' ? counts.all : counts[s.key];
                     const colorMap = {
                         slate: isActive ? 'bg-slate-700 text-white dark:bg-slate-200 dark:text-slate-900' : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700',
                         emerald: isActive ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-500/10 dark:text-emerald-400 dark:hover:bg-emerald-500/20',
@@ -144,7 +148,16 @@ export default function Devices() {
                         red: isActive ? 'bg-red-600 text-white' : 'bg-red-50 text-red-700 hover:bg-red-100 dark:bg-red-500/10 dark:text-red-400 dark:hover:bg-red-500/20'
                     };
                     return (
-                        <button key={s.key} onClick={() => { setStatusFilter(s.key); setPage(1); setSelected(new Set()); }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-all duration-200 whitespace-nowrap ${colorMap[s.color]}`}>
+                        <button key={s.key} onClick={() => { 
+                            setStatusFilter(s.key); 
+                            setPage(1); 
+                            setSelected(new Set()); 
+                            setSearchParams(prev => {
+                                const next = new URLSearchParams(prev);
+                                next.set('status', s.key);
+                                return next;
+                            }, { replace: true });
+                        }} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-all duration-200 whitespace-nowrap ${colorMap[s.color]}`}>
                             {s.label}
                             {count !== undefined && <span className={`ml-0.5 text-[10px] font-bold ${isActive ? 'opacity-80' : 'opacity-60'}`}>{count}</span>}
                         </button>

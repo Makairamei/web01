@@ -27,8 +27,12 @@ export default function Licenses() {
     const [page, setPage] = useState(1);
     const [search, setSearch] = useState(() => searchParams.get('search') || '');
     const [searchInput, setSearchInput] = useState(() => searchParams.get('search') || '');
-    const [statusFilter, setStatus] = useState(() => searchParams.get('status') || '');
+    const [statusFilter, setStatus] = useState(() => searchParams.get('status') || 'all');
     const [dateRange, setDateRange] = useState('');
+
+    useEffect(() => {
+        setStatus(searchParams.get('status') || 'all');
+    }, [searchParams]);
     const [selected, setSelected] = useState(new Set());
     const [drawer, setDrawer] = useState(null);    // license obj for detail view
     const [drawerData, setDrawerData] = useState(null);  // enriched from API
@@ -49,7 +53,7 @@ export default function Licenses() {
     })();
 
     const { data, loading, refetch } = useApi(
-        `/admin/licenses?page=${page}&limit=${LIMIT}&search=${encodeURIComponent(search)}&status=${statusFilter}&date_from=${encodeURIComponent(dateFrom)}`,
+        `/admin/licenses?page=${page}&limit=${LIMIT}&search=${encodeURIComponent(search)}&status=${statusFilter === 'all' ? '' : statusFilter}&date_from=${encodeURIComponent(dateFrom)}`,
         [page, search, statusFilter, dateFrom]
     );
 
@@ -200,23 +204,33 @@ export default function Licenses() {
             {/* ── Status Filter Pills ── */}
             <div className="flex flex-wrap items-center gap-1.5">
                 {[
-                    { key: '', label: 'All', color: 'slate', icon: null },
+                    { key: 'all', label: 'All', color: 'slate', icon: null },
                     { key: 'active', label: 'Active', color: 'emerald', icon: null },
                     { key: 'expiring_soon', label: 'Expiring Soon', color: 'amber', icon: AlertTriangle },
                     { key: 'expired', label: 'Expired', color: 'red', icon: null },
                     { key: 'revoked', label: 'Revoked', color: 'purple', icon: null },
+                    { key: 'trial', label: 'Trial', color: 'teal', icon: null },
                 ].map(s => {
                     const isActive = statusFilter === s.key;
-                    const count = s.key === '' ? counts.all : counts[s.key];
+                    const count = s.key === 'all' ? counts.all : counts[s.key];
                     const colorMap = {
                         slate: isActive ? 'bg-slate-700 text-white dark:bg-slate-200 dark:text-slate-900' : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700',
                         emerald: isActive ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-500/10 dark:text-emerald-400 dark:hover:bg-emerald-500/20',
                         amber: isActive ? 'bg-amber-500 text-white' : 'bg-amber-50 text-amber-700 hover:bg-amber-100 dark:bg-amber-500/10 dark:text-amber-400 dark:hover:bg-amber-500/20',
                         red: isActive ? 'bg-red-600 text-white' : 'bg-red-50 text-red-700 hover:bg-red-100 dark:bg-red-500/10 dark:text-red-400 dark:hover:bg-red-500/20',
                         purple: isActive ? 'bg-purple-600 text-white' : 'bg-purple-50 text-purple-700 hover:bg-purple-100 dark:bg-purple-500/10 dark:text-purple-400 dark:hover:bg-purple-500/20',
+                        teal: isActive ? 'bg-teal-600 text-white' : 'bg-teal-50 text-teal-700 hover:bg-teal-100 dark:bg-teal-500/10 dark:text-teal-400 dark:hover:bg-teal-500/20',
                     };
                     return (
-                        <button key={s.key} onClick={() => { setStatus(s.key); setPage(1); }}
+                        <button key={s.key} onClick={() => { 
+                            setStatus(s.key); 
+                            setPage(1); 
+                            setSearchParams(prev => {
+                                const next = new URLSearchParams(prev);
+                                next.set('status', s.key);
+                                return next;
+                            }, { replace: true });
+                        }}
                             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-all duration-200 ${colorMap[s.color]}`}>
                             {s.icon && <s.icon className="w-3 h-3" />}
                             {s.label}

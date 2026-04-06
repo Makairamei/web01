@@ -192,10 +192,10 @@ function OverviewTab({ stats, period }) {
         <div className="space-y-5">
             {/* Quick summary strip */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                <KpiCard label="Total Lisensi"      value={stats?.totalLicenses}    icon={Key}        color="indigo"  path="/licenses" />
-                <KpiCard label="Total Device"       value={stats?.totalDevices}     icon={Monitor}    color="blue"    path="/devices" />
+                <KpiCard label="Total Lisensi"      value={stats?.totalLicenses}    icon={Key}        color="indigo"  path="/licenses?status=all" />
+                <KpiCard label="Total Device"       value={stats?.totalDevices}     icon={Monitor}    color="blue"    path="/devices?status=all" />
                 <KpiCard label="Playback Hari Ini"  value={stats?.todayPlaybacks}   icon={PlayCircle} color="emerald" path="/activity/playback" />
-                <KpiCard label="API Request"        value={stats?.apiRequestCount}  icon={Server}     color="violet"  path="/activity/live" sub="Hari ini" />
+                <KpiCard label="Total API Request"  value={stats?.apiRequestCount}  icon={Server}     color="violet"  path="/activity/live" sub="Hari ini" />
             </div>
 
             {/* 3 Charts */}
@@ -266,7 +266,7 @@ function OverviewTab({ stats, period }) {
                             </PieChart>
                             <div className="w-full space-y-2">
                                 {pie.map(e => (
-                                    <div key={e.key} onClick={() => nav(e.key === 'trial' ? '/licenses' : `/licenses?status=${e.key}`)} className="flex items-center justify-between p-1.5 px-3 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer transition-colors">
+                                    <div key={e.key} onClick={() => nav(e.key === 'revoked' ? '/licenses?status=revoked' : e.key === 'trial' ? '/licenses?status=trial' : `/licenses?status=${e.key}`)} className="flex items-center justify-between p-1.5 px-3 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer transition-colors">
                                         <div className="flex items-center gap-2.5">
                                             <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: PIE_COLORS_MAP[e.key] }} />
                                             <span className="text-[12px] font-medium text-slate-600 dark:text-slate-400 group-hover:text-indigo-500 transition-colors">{e.name}</span>
@@ -299,12 +299,12 @@ function LicenseTab({ stats }) {
     return (
         <div className="space-y-5">
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-                <KpiCard label="Total Lisensi"   value={stats?.totalLicenses}   icon={Key}          color="indigo"  path="/licenses" />
+                <KpiCard label="Total Lisensi"   value={stats?.totalLicenses}   icon={Key}          color="indigo"  path="/licenses?status=all" />
                 <KpiCard label="Aktif"           value={stats?.activeLicenses}  icon={CheckCircle}  color="emerald" path="/licenses?status=active" />
                 <KpiCard label="Expired"         value={stats?.expiredLicenses} icon={XCircle}      color="rose"    path="/licenses?status=expired" />
                 <KpiCard label="Expiring Soon"   value={stats?.expiringSoon}    icon={Clock}        color="amber"   path="/licenses?status=expiring_soon" sub="≤ 7 hari" />
                 <KpiCard label="Suspended"       value={stats?.revokedLicenses} icon={Shield}       color="pink"    path="/licenses?status=revoked" />
-                <KpiCard label="Trial"           value={stats?.trialLicenses}   icon={Key}          color="teal"    path="/licenses" />
+                <KpiCard label="Trial"           value={stats?.trialLicenses}   icon={Key}          color="teal"    path="/licenses?status=trial" />
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -323,7 +323,7 @@ function LicenseTab({ stats }) {
                             </PieChart>
                             <div className="w-full space-y-1">
                                 {pie.map(e => (
-                                    <div key={e.key} onClick={() => nav(e.key === 'trial' ? '/licenses' : `/licenses?status=${e.key}`)} className="flex items-center justify-between p-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/40 cursor-pointer transition-colors">
+                                    <div key={e.key} onClick={() => nav(e.key === 'revoked' ? '/licenses?status=revoked' : e.key === 'trial' ? '/licenses?status=trial' : `/licenses?status=${e.key}`)} className="flex items-center justify-between p-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/40 cursor-pointer transition-colors">
                                         <div className="flex items-center gap-2">
                                             <span className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: PIE_COLORS_MAP[e.key] }} />
                                             <span className="text-[12px] font-medium text-slate-600 dark:text-slate-400">{e.name}</span>
@@ -389,13 +389,12 @@ function DeviceTab({ stats, period, setPeriod }) {
 
     return (
         <div className="space-y-5">
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-                <KpiCard label="Device ON"       value={stats?.devicesOnline}    icon={Wifi}         color="emerald" path="/devices" />
-                <KpiCard label="Device OFF"      value={stats?.devicesOffline}   icon={WifiOff}      color="slate"   path="/devices" />
-                <KpiCard label="Device Expired"  value={stats?.devicesExpired}   icon={Clock}        color="orange"  path="/devices" />
-                <KpiCard label="Device Blocked"  value={stats?.devicesBlocked}   icon={XCircle}      color="rose"    path="/security" />
-                <KpiCard label="Baru Hari Ini"   value={stats?.newDevicesToday}  icon={Plus}         color="cyan"    path="/devices?" />
-                <KpiCard label="Login Hari Ini"  value={stats?.deviceLoginToday} icon={LogIn}        color="blue"    path="/activity/live?filter=LOGIN" />
+            <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+                <KpiCard label="Device Online"   value={stats?.devicesOnline}    icon={Wifi}         color="emerald" path="/devices?status=online" />
+                <KpiCard label="Device Offline"  value={stats?.devicesOffline}   icon={WifiOff}      color="slate"   path="/devices?status=offline" />
+                <KpiCard label="Baru Hari Ini"   value={stats?.newDevicesToday}  icon={Plus}         color="cyan"    path="/devices?status=all" />
+                <KpiCard label="Login Hari Ini"  value={stats?.deviceLoginToday} icon={LogIn}        color="indigo"  path="/activity/live" />
+                <KpiCard label="All Device"      value={stats?.totalDevices}     icon={Monitor}      color="blue"    path="/devices?status=all" />
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -471,7 +470,7 @@ function ActivityTab({ stats, period }) {
                 <KpiCard label="Playback Hari Ini"   value={stats?.todayPlaybacks}   icon={PlayCircle}   color="indigo"  path="/activity/playback" />
                 <KpiCard label="Validasi Hari Ini"   value={stats?.todayValidations} icon={CheckCircle}  color="emerald" path="/activity/live?filter=VALIDATE_OK" />
                 <KpiCard label="Playback Berhasil"   value={stats?.playbackSuccess}  icon={CheckCircle}  color="teal"    path="/activity/playback" />
-                <KpiCard label="Playback Gagal"      value={stats?.playbackFailed}   icon={AlertOctagon} color="rose"    path="/activity/live?filter=VALIDATE_FAIL" />
+                <KpiCard label="Playback Gagal"      value={stats?.playbackFailed}   icon={AlertOctagon} color="rose"    path="/activity/playback" />
                 <KpiCard label="Validasi Gagal"      value={stats?.validationFailed} icon={ShieldAlert}  color="amber"   path="/activity/live?filter=VALIDATE_FAIL" />
                 <KpiCard label="Total API Request"   value={stats?.apiRequestCount}  icon={Server}       color="violet"  path="/activity/live" sub="Hari ini" />
             </div>
