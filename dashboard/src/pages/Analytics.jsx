@@ -266,7 +266,7 @@ function OverviewTab({ stats, period }) {
                             </PieChart>
                             <div className="w-full space-y-2">
                                 {pie.map(e => (
-                                    <div key={e.key} onClick={() => nav(e.key === 'active' ? '/licenses?status=active' : e.key === 'expired' ? '/licenses?status=expired' : '/licenses')} className="flex items-center justify-between p-1.5 px-3 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer transition-colors">
+                                    <div key={e.key} onClick={() => nav(e.key === 'trial' ? '/licenses' : `/licenses?status=${e.key}`)} className="flex items-center justify-between p-1.5 px-3 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer transition-colors">
                                         <div className="flex items-center gap-2.5">
                                             <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: PIE_COLORS_MAP[e.key] }} />
                                             <span className="text-[12px] font-medium text-slate-600 dark:text-slate-400 group-hover:text-indigo-500 transition-colors">{e.name}</span>
@@ -302,9 +302,9 @@ function LicenseTab({ stats }) {
                 <KpiCard label="Total Lisensi"   value={stats?.totalLicenses}   icon={Key}          color="indigo"  path="/licenses" />
                 <KpiCard label="Aktif"           value={stats?.activeLicenses}  icon={CheckCircle}  color="emerald" path="/licenses?status=active" />
                 <KpiCard label="Expired"         value={stats?.expiredLicenses} icon={XCircle}      color="rose"    path="/licenses?status=expired" />
-                <KpiCard label="Expiring Soon"   value={stats?.expiringSoon}    icon={Clock}        color="amber"   path="/licenses" sub="≤ 7 hari" />
-                <KpiCard label="Suspended"       value={stats?.revokedLicenses} icon={Shield}       color="pink"    path="/security" />
-                <KpiCard label="Trial"           value={stats?.trialLicenses}   icon={Key}          color="teal"    path="/licenses?status=active" />
+                <KpiCard label="Expiring Soon"   value={stats?.expiringSoon}    icon={Clock}        color="amber"   path="/licenses?status=expiring_soon" sub="≤ 7 hari" />
+                <KpiCard label="Suspended"       value={stats?.revokedLicenses} icon={Shield}       color="pink"    path="/licenses?status=revoked" />
+                <KpiCard label="Trial"           value={stats?.trialLicenses}   icon={Key}          color="teal"    path="/licenses" />
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -323,7 +323,7 @@ function LicenseTab({ stats }) {
                             </PieChart>
                             <div className="w-full space-y-1">
                                 {pie.map(e => (
-                                    <div key={e.key} onClick={() => nav(e.key === 'active' ? '/licenses?status=active' : e.key === 'expired' ? '/licenses?status=expired' : '/licenses')} className="flex items-center justify-between p-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/40 cursor-pointer transition-colors">
+                                    <div key={e.key} onClick={() => nav(e.key === 'trial' ? '/licenses' : `/licenses?status=${e.key}`)} className="flex items-center justify-between p-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/40 cursor-pointer transition-colors">
                                         <div className="flex items-center gap-2">
                                             <span className="w-2.5 h-2.5 rounded-sm" style={{ backgroundColor: PIE_COLORS_MAP[e.key] }} />
                                             <span className="text-[12px] font-medium text-slate-600 dark:text-slate-400">{e.name}</span>
