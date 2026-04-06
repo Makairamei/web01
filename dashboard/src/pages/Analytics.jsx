@@ -390,11 +390,11 @@ function DeviceTab({ stats, period, setPeriod }) {
     return (
         <div className="space-y-5">
             <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+                <KpiCard label="All Device"      value={stats?.totalDevices}     icon={Monitor}      color="blue"    path="/devices?status=all" />
                 <KpiCard label="Device Online"   value={stats?.devicesOnline}    icon={Wifi}         color="emerald" path="/devices?status=online" />
                 <KpiCard label="Device Offline"  value={stats?.devicesOffline}   icon={WifiOff}      color="slate"   path="/devices?status=offline" />
                 <KpiCard label="Baru Hari Ini"   value={stats?.newDevicesToday}  icon={Plus}         color="cyan"    path="/devices?status=all" />
                 <KpiCard label="Login Hari Ini"  value={stats?.deviceLoginToday} icon={LogIn}        color="indigo"  path="/activity/live" />
-                <KpiCard label="All Device"      value={stats?.totalDevices}     icon={Monitor}      color="blue"    path="/devices?status=all" />
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
